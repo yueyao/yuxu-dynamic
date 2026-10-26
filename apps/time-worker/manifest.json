@@ -1,0 +1,25 @@
+{
+  "app_id": "time-service",
+  "release_digest": "time-v1",
+  "max_concurrency": 2,
+  "tasks": [
+    {
+      "task_key": "time/now",
+      "timeout_ms": 60000,
+      "max_attempts": 3,
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["server_time", "timezone"],
+        "additionalProperties": false,
+        "properties": {
+          "server_time": { "type": "string", "minLength": 20 },
+          "timezone": { "type": "string", "enum": ["UTC"] }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "yuxu-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "yuxu": "./apps/cli/src/main.ts"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "bootstrap": "node apps/platform-api/src/bootstrap.ts",
+    "register-app": "node apps/platform-api/src/register-app.ts",
+    "server": "node apps/platform-api/src/main.ts",
+    "worker": "node apps/example-app/src/worker.ts",
+    "time-worker": "node apps/time-worker/src/main.ts",
+    "time-cli": "node apps/time-cli/src/main.ts",
+    "smoke:time": "bash scripts/smoke-time-query.sh",
+    "yuxu": "node apps/cli/src/main.ts",
+    "platform": "npm run yuxu --",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "25.5.0",
+    "typescript": "5.9.3"
+  }
+}
