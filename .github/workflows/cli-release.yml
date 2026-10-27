@@ -1,0 +1,88 @@
+name: CLI package and release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['yuxu-cli-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - name: Verify release tag matches the CLI version
+        if: startsWith(github.ref, 'refs/tags/yuxu-cli-v')
+        shell: bash
+        run: |
+          version="$(node -p "require('./apps/cli/package.json').version")"
+          tag_version="${GITHUB_REF_NAME#yuxu-cli-v}"
+          if [[ "$tag_version" != "$version" ]]; then
+            echo "Tag version $tag_version does not match CLI package version $version" >&2
+            exit 1
+          fi
+      - run: npm run pack:cli
+      - run: npm run smoke:cli-package
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/yuxu-cli-v')
+        with:
+          name: yuxu-cli-package
+          path: .release/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/yuxu-cli-v') && vars.YUXU_NPM_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: yuxu-cli-package
+          path: .release
+      - name: Select npm dist-tag
+        id: release
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#yuxu-cli-v}"
+          if [[ "$version" == *-* ]]; then
+            prerelease="${version#*-}"
+            dist_tag="${prerelease%%.*}"
+          else
+            dist_tag="latest"
+          fi
+          package_name="$(node -p "require('./apps/cli/package.json').name")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+      - name: Publish verified tarball with provenance
+        run: |
+          npm publish \
+            ".release/${{ steps.release.outputs.package_name }}-${{ steps.release.outputs.version }}.tgz" \
+            --access public \
+            --provenance \
+            --tag "${{ steps.release.outputs.dist_tag }}"

@@ -2,7 +2,7 @@
 
 总体架构见 [总体方案](./index.md)，完整目标见 [详细设计](./detailed-design.md)。本文件记录实际落地顺序与当前 MVP 的取舍。
 
-当前进度：M0 本地任务闭环已实现；其中时间任务完成本机真实 HTTP 验收，较长任务的恢复与产物下载由自动化测试覆盖。M1 已抽出通用 Worker SDK、加入受控的任务输入/输出 schema、旧 SQLite 数据升级及本地应用声明导入。自动化测试与类型检查已通过。PostgreSQL 与 S3 兼容存储尚未实现和联调。
+当前进度：M0 本地任务闭环已实现；其中时间任务完成本机真实 HTTP 验收，较长任务的恢复与产物下载由自动化测试覆盖。M1 已抽出通用 Worker SDK、加入受控的任务输入/输出 schema、旧 SQLite 数据升级及本地应用声明导入。个人 CLI 已拆为独立 npm 包，支持隔离安装验证，并配置了基于 GitHub Actions OIDC 的发布工作流；npm 名称确认与 Trusted Publisher 配置待发布者完成。PostgreSQL 与 S3 兼容存储尚未实现和联调。
 
 验证用例使用独立时间查询 CLI 和 Worker：CLI 可配置服务器地址并提交时间任务，Worker 以 JSON 返回执行机器的 UTC 时间。自动化测试覆盖进程内 HTTP 路由和三个独立进程的 IPC 测试。2026-10-26，用户在普通本机终端运行 `npm run smoke:time`，回传任务 `bf116fe5-79d5-483c-927b-aa159491fc75` 的成功结果 `2026-10-26T06:01:39.577Z`（UTC），证明本机独立进程的真实 HTTP 链路已打通。跨机器部署和 HTTPS 入口尚未验收。链路说明见 [时间查询闭环](./time-query-flow.md)。
 

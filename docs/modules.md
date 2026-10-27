@@ -30,6 +30,8 @@ flowchart LR
 | [`apps/platform-api/src/server.ts`](../apps/platform-api/src/server.ts) | HTTP 路由、认证、参数校验、产物传输和租约扫描 | `createApiServer` |
 | [`apps/cli/src/main.ts`](../apps/cli/src/main.ts) | 玉虚 CLI 命令入口：登录、任务操作、事件追踪和下载 | `main` / `yuxu` / `npm run yuxu -- ...` |
 | [`apps/cli/src/config.ts`](../apps/cli/src/config.ts) | 个人 CLI 的服务器地址规范化、配置目录、按 origin 隔离的令牌存取 | `resolveServer`、`readToken`、`saveToken` |
+| [`apps/cli/package.json`](../apps/cli/package.json) | CLI 的独立 npm 发布元数据、命令入口和包文件白名单 | `npm pack ./apps/cli`、发布工作流 |
+| [`apps/cli/README.md`](../apps/cli/README.md) | npm 包安装、基础命令和配置说明 | npm 包首页 |
 | [`packages/client-sdk/src/index.ts`](../packages/client-sdk/src/index.ts) | 用户侧 HTTP 客户端，供 CLI 和应用后端提交、查询历史、结果、日志及下载产物 | `PlatformClient`、`PlatformError` |
 | [`apps/example-app/src/worker.ts`](../apps/example-app/src/worker.ts) | 示例报告任务及持续领取循环 | `executeLease`、`runOnce` / `npm run worker` |
 | [`apps/time-cli/src/main.ts`](../apps/time-cli/src/main.ts) | 独立时间查询客户端，配置服务器并等待 JSON 结果 | `main` / `npm run time-cli -- ...` |
@@ -47,6 +49,10 @@ flowchart LR
 | [`test/process-boundary.test.ts`](../test/process-boundary.test.ts) | CLI、API、Worker 三个独立进程的任务闭环测试 | `npm test` |
 | [`test/support/ipc-api.ts`](../test/support/ipc-api.ts)、[`test/support/ipc-fetch.ts`](../test/support/ipc-fetch.ts) | 测试专用进程间请求桥接，复用生产 HTTP 路由 | 跨进程测试内部使用 |
 | [`scripts/smoke-time-query.sh`](../scripts/smoke-time-query.sh) | 独立进程真实 HTTP 联调脚本 | `npm run smoke:time` |
+| [`scripts/pack-cli.ts`](../scripts/pack-cli.ts) | 创建发布目录并生成可全局安装的 CLI npm 包 | `npm run pack:cli` |
+| [`scripts/build-cli.ts`](../scripts/build-cli.ts) | 清理并编译 CLI 发布目录、复制许可证 | `npm run build:cli` |
+| [`scripts/smoke-cli-package.ts`](../scripts/smoke-cli-package.ts) | 临时全局安装生成的 tarball 并验证入口和配置命令 | `npm run smoke:cli-package` |
+| [`.github/workflows/cli-release.yml`](../.github/workflows/cli-release.yml) | Node.js 24 验证、tag/版本校验及 OIDC npm 发布 | `yuxu-cli-v*` 标签 |
 
 ### 项目级文件
 
@@ -55,6 +61,8 @@ flowchart LR
 | [`package.json`](../package.json) | Node 版本要求、启动命令、测试和类型检查脚本；运行时无第三方依赖 |
 | [`package-lock.json`](../package-lock.json) | TypeScript 与 Node 类型包的锁定版本 |
 | [`tsconfig.json`](../tsconfig.json) | 严格类型检查、NodeNext 模块解析和 `.ts` 扩展名导入 |
+| [`tsconfig.cli.build.json`](../tsconfig.cli.build.json) | 仅编译 CLI 及用户侧 SDK，并把相对 `.ts` 导入改写为可发布的 `.js` 导入 |
+| [`docs/cli-release.md`](./cli-release.md) | CLI npm 包结构、版本、验证、Trusted Publisher 与发布流程 | 发布操作参考 |
 | [`README.md`](../README.md) | 操作者启动、登录、提交与下载步骤 |
 | [`AGENTS.md`](../AGENTS.md) | 开发协作约定和文档入口 |
 
@@ -150,6 +158,8 @@ flowchart LR
 ### CLI
 
 `apps/cli/src/main.ts` 提供 `config set-server/show`、`login/logout`、`apps list`、`tasks list/history`、`task run/get/result/logs/watch` 和 `artifact download`。终端命令名为 `yuxu`，项目建议仓库名为 `yuxu-platform`。任务输入可来自 JSON 文件、标准输入或 `--input-json`；`--wait` 轮询到终态，等待超时不会取消远端任务。交互登录时终端不回显密码；`PLATFORM_PASSWORD` 可供自动化登录使用。CLI 默认配置在 `~/.config/yuxu`（或 `$XDG_CONFIG_HOME/yuxu`），令牌按服务器 origin 分文件保存并限制为 `0600`。旧 `platform-cli` 配置会在首次访问时按文件迁移。`YUXU_CLI_DIR` 指定单独配置目录，旧变量 `PLATFORM_CLI_DIR` 保持兼容；显式的 `PLATFORM_TOKEN` 可覆盖文件令牌。远端服务器要求 HTTPS。`task watch` 每秒读取事件游标和任务快照，直到成功或失败并打印结果。当前没有 SSE。
+
+开发时由 Node.js 直接运行 TypeScript 源码。`npm run build:cli` 会将 CLI 和它依赖的用户侧 SDK 编译到 `apps/cli/package-dist/`，并把相对导入改写成 `.js`；`npm run pack:cli` 在 `.release/` 生成只包含这些运行文件、许可证和 CLI README 的 npm 安装包。根 package 是私有开发包，不应发布。安装后的 `yuxu` 不依赖 TypeScript 或仓库里的平台服务端源码。发布链路见 [CLI npm 发布流程](./cli-release.md)。
 
 `PlatformClient` 封装用户侧任务提交、历史分页、快照、结果、事件、日志及产物下载。CLI 的用户侧操作调用该客户端；应用后端也可使用同一模块。它接收调用方提供的用户令牌，当前不负责 Web 登录会话或跨用户授权。
 

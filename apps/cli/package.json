@@ -1,0 +1,36 @@
+{
+  "name": "yuxu-platform-cli",
+  "version": "0.1.0-next.0",
+  "description": "玉虚共享应用平台的命令行客户端",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "yuxu": "./package-dist/apps/cli/src/main.js"
+  },
+  "files": [
+    "package-dist/apps/cli",
+    "package-dist/packages/client-sdk",
+    "package-dist/LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yueyao/yuxu-dynamic.git",
+    "directory": "apps/cli"
+  },
+  "homepage": "https://github.com/yueyao/yuxu-dynamic#readme",
+  "bugs": {
+    "url": "https://github.com/yueyao/yuxu-dynamic/issues"
+  },
+  "keywords": [
+    "yuxu",
+    "cli",
+    "task-platform"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "./apps/cli/package-dist",
+    "rootDir": ".",
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "apps/cli/src/**/*.ts",
+    "packages/client-sdk/src/**/*.ts"
+  ]
+}

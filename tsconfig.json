@@ -9,5 +9,5 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "test/**/*.ts"]
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }

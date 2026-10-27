@@ -2,9 +2,11 @@
   "name": "yuxu-platform",
   "version": "0.1.0",
   "private": true,
+  "description": "玉虚共享应用平台的命令行客户端与本地开发工具",
+  "license": "MIT",
   "type": "module",
   "bin": {
-    "yuxu": "./apps/cli/src/main.ts"
+    "yuxu": "./apps/cli/package-dist/apps/cli/src/main.js"
   },
   "engines": {
     "node": ">=24.0.0"
@@ -17,6 +19,9 @@
     "time-worker": "node apps/time-worker/src/main.ts",
     "time-cli": "node apps/time-cli/src/main.ts",
     "smoke:time": "bash scripts/smoke-time-query.sh",
+    "build:cli": "node scripts/build-cli.ts",
+    "pack:cli": "node scripts/pack-cli.ts",
+    "smoke:cli-package": "node scripts/smoke-cli-package.ts",
     "yuxu": "node apps/cli/src/main.ts",
     "platform": "npm run yuxu --",
     "test": "node --test test/*.test.ts",

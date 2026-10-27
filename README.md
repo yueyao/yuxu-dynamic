@@ -50,7 +50,24 @@ npm run yuxu -- tasks history --app example-app --limit 20
 npm run yuxu -- artifact download ARTIFACT_ID --out .local/report.txt
 ```
 
-日常使用可在仓库根目录执行 `npm link`，之后直接运行 `yuxu --help`。项目名称为“玉虚”，Git 仓库/文件夹建议名为 `yuxu-platform`。个人 CLI 配置默认保存在 `~/.config/yuxu`（遵循 `XDG_CONFIG_HOME`）；令牌按服务器地址分别保存。可用 `YUXU_CLI_DIR` 指定另一份本机配置目录，旧变量 `PLATFORM_CLI_DIR` 仍可使用。
+日常开发可在仓库根目录依次执行 `npm run build:cli` 和 `npm link`，之后直接运行 `yuxu --help`。根目录是私有开发包；独立 CLI 包位于 `apps/cli`，发布说明见 [CLI npm 发布流程](./docs/cli-release.md)。个人 CLI 配置默认保存在 `~/.config/yuxu`（遵循 `XDG_CONFIG_HOME`）；令牌按服务器地址分别保存。可用 `YUXU_CLI_DIR` 指定本机配置目录，旧变量 `PLATFORM_CLI_DIR` 仍可使用。
+
+### 安装 CLI
+
+项目根目录执行 `npm run pack:cli` 会在 `.release/` 生成独立 CLI npm 包；`npm run smoke:cli-package` 会在临时目录安装并验证该包。Node.js 24 或更新版本上可直接安装本地产物：
+
+```sh
+npm install --global ./.release/yuxu-platform-cli-0.1.0-next.0.tgz
+yuxu --help
+```
+
+首次 npm 预发布后可安装 `yuxu-platform-cli@next`；稳定版发布后使用：
+
+```sh
+npm install --global yuxu-platform-cli
+```
+
+源码开发仍可使用 `npm run yuxu -- ...`；修改 CLI 后重新执行 `npm run pack:cli` 生成安装包。发布流程和 npm Trusted Publisher 配置见 [CLI npm 发布流程](./docs/cli-release.md)。
 
 配置并登录平台：
 

@@ -4,8 +4,9 @@
  * 本模块不读取平台数据库；持久化配置和凭据由 config.ts 管理。
  */
 import { readFile, stat, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { PlatformClient, type TaskStatus } from '../../../packages/client-sdk/src/index.ts';
 import { configuredServer, forgetToken, readToken, resolveServer, saveServer, saveToken } from './config.ts';
 
@@ -287,7 +288,17 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   usage();
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+function isEntrypoint(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    // npm 全局安装的 bin 是符号链接；两边都取真实路径后才能正确识别直接执行。
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
   main().catch((error) => {
     console.error((error as Error).message);
     process.exitCode = 1;
