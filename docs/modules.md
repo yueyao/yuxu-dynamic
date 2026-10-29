@@ -63,6 +63,8 @@ flowchart LR
 | [`tsconfig.json`](../tsconfig.json) | 严格类型检查、NodeNext 模块解析和 `.ts` 扩展名导入 |
 | [`tsconfig.cli.build.json`](../tsconfig.cli.build.json) | 仅编译 CLI 及用户侧 SDK，并把相对 `.ts` 导入改写为可发布的 `.js` 导入 |
 | [`docs/cli-release.md`](./cli-release.md) | CLI npm 包结构、版本、验证、Trusted Publisher 与发布流程 | 发布操作参考 |
+| [`docs/cli-installation.md`](./cli-installation.md) | CLI 安装、服务器配置、登录、环境变量与常见问题 | 使用者安装配置参考 |
+| [`docs/cli-release-notes.md`](./cli-release-notes.md) | 首个 CLI 预发布版本的能力、限制和验证结果 | `0.1.0-next.0` 发布说明 |
 | [`README.md`](../README.md) | 操作者启动、登录、提交与下载步骤 |
 | [`AGENTS.md`](../AGENTS.md) | 开发协作约定和文档入口 |
 

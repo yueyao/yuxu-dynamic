@@ -1,18 +1,18 @@
-# yuxu-platform-cli
+# yuxu-dynamic-cli
 
 玉虚（Yuxu）共享应用平台的命令行客户端。CLI 通过平台 HTTP API 提交和查询任务；任务由平台侧 Worker 执行。
 
 需要 Node.js 24 或更新版本。安装稳定版：
 
 ```sh
-npm install --global yuxu-platform-cli
+npm install --global yuxu-dynamic-cli
 yuxu --help
 ```
 
 预发布版本使用 `next` 标签安装：
 
 ```sh
-npm install --global yuxu-platform-cli@next
+npm install --global yuxu-dynamic-cli@next
 ```
 
 配置平台并登录：
@@ -33,4 +33,4 @@ yuxu task result TASK_ID
 yuxu artifact download ARTIFACT_ID --out report.txt
 ```
 
-完整命令和平台本地部署说明见[项目仓库](https://github.com/yueyao/yuxu-dynamic)。
+完整的安装、配置和命令说明见 [CLI 安装与配置说明](https://github.com/yueyao/yuxu-dynamic/blob/main/docs/cli-installation.md)，版本变化见 [CLI 发布说明](https://github.com/yueyao/yuxu-dynamic/blob/main/docs/cli-release-notes.md)。平台本地部署说明见[项目仓库](https://github.com/yueyao/yuxu-dynamic)。

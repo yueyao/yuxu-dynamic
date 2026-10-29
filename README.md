@@ -57,17 +57,17 @@ npm run yuxu -- artifact download ARTIFACT_ID --out .local/report.txt
 项目根目录执行 `npm run pack:cli` 会在 `.release/` 生成独立 CLI npm 包；`npm run smoke:cli-package` 会在临时目录安装并验证该包。Node.js 24 或更新版本上可直接安装本地产物：
 
 ```sh
-npm install --global ./.release/yuxu-platform-cli-0.1.0-next.0.tgz
+npm install --global ./.release/yuxu-dynamic-cli-0.1.0-next.0.tgz
 yuxu --help
 ```
 
-首次 npm 预发布后可安装 `yuxu-platform-cli@next`；稳定版发布后使用：
+首次 npm 预发布后可安装 `yuxu-dynamic-cli@next`；稳定版发布后使用：
 
 ```sh
-npm install --global yuxu-platform-cli
+npm install --global yuxu-dynamic-cli
 ```
 
-源码开发仍可使用 `npm run yuxu -- ...`；修改 CLI 后重新执行 `npm run pack:cli` 生成安装包。发布流程和 npm Trusted Publisher 配置见 [CLI npm 发布流程](./docs/cli-release.md)。
+源码开发仍可使用 `npm run yuxu -- ...`；修改 CLI 后重新执行 `npm run pack:cli` 生成安装包。使用者可参阅 [CLI 安装与配置说明](./docs/cli-installation.md) 和 [0.1.0-next.0 发布说明](./docs/cli-release-notes.md)；维护者的发布流程和 npm Trusted Publisher 配置见 [CLI npm 发布流程](./docs/cli-release.md)。
 
 配置并登录平台：
 

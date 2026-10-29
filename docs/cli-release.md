@@ -1,6 +1,6 @@
 # CLI npm 发布流程
 
-CLI 以独立 npm 包发布；仓库根目录是私有开发包，不得直接发布。包名暂定为 `yuxu-platform-cli`，终端命令为 `yuxu`。首次发布前需确认该名称可注册；若名称被占用，修改 `apps/cli/package.json` 和发布工作流中对应的 tarball 名称。
+CLI 以独立 npm 包 `yuxu-dynamic-cli` 发布；仓库根目录是私有开发包，不得直接发布。终端命令为 `yuxu`。首次发布前仍需确认该名称可注册。
 
 ## 包构建
 
@@ -28,10 +28,10 @@ git push origin yuxu-cli-v0.1.0-next.0
 
 npm 首次发布前的仓库配置：
 
-1. 在 npm 上确认并创建 `yuxu-platform-cli` 包名；启用账户双重验证。
+1. 在 npm 上确认并创建 `yuxu-dynamic-cli` 包名；启用账户双重验证。
 2. 在 npm 包设置中添加 GitHub Actions Trusted Publisher，仓库为 `yueyao/yuxu-dynamic`，workflow 为 `CLI package and release` 对应的 `.github/workflows/cli-release.yml`。
 3. 在 GitHub 创建 `npm-production` environment，并设置所需审批人；发布 job 获批后通过 OIDC 获取短期发布授权。
 4. 完成前三项并测试好发布权限后，再设置仓库变量 `YUXU_NPM_PUBLISH_ENABLED=true`。未设置该变量时，即使推送版本 tag，CI 仍会验证包但跳过发布。
-5. 首次发布 `0.1.0-next.0` 后，从 npm registry 安装 `yuxu-platform-cli@next` 实机验证；确认后发布 `0.1.0`，将稳定版设为 `latest`。
+5. 首次发布 `0.1.0-next.0` 后，从 npm registry 安装 `yuxu-dynamic-cli@next` 实机验证；确认后发布 `0.1.0`，将稳定版设为 `latest`。
 
 不在仓库保存 npm token，也不手工覆盖已发布版本。发布错误通过增加版本号修复；不要依赖撤包作为回滚手段。

@@ -1,5 +1,5 @@
 {
-  "name": "yuxu-platform-cli",
+  "name": "yuxu-dynamic-cli",
   "version": "0.1.0-next.0",
   "description": "玉虚共享应用平台的命令行客户端",
   "license": "MIT",
