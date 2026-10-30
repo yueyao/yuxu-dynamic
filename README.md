@@ -1,6 +1,6 @@
 # 玉虚（Yuxu）：共享应用平台
 
-当前版本实现了一个可运行的任务底座：CLI 或应用后端提交立即/单次计划任务，独立 Worker 领取任务、记录步骤、进度和日志，返回结构化结果或文件产物；平台持久化历史与状态，在 Worker 中断后回收租约并继续执行。目标架构见 [总体方案](./docs/index.md)，接口契约见 [任务底座调用与状态契约](./docs/task-platform-flow.md)，现有代码的逐模块说明见 [模块说明](./docs/modules.md)。
+当前版本实现了一个可运行的任务底座：CLI 或应用后端提交立即/单次计划任务，独立 Worker 领取任务、记录步骤、进度和日志，返回结构化结果或文件产物；平台持久化历史与状态，在 Worker 中断后回收租约并继续执行。目标架构见 [总体方案](./docs/index.md)，客户端、平台和服务端 Worker 的职责边界见 [服务端任务设计](./docs/server-task-design.md)，接口契约见 [任务底座调用与状态契约](./docs/task-platform-flow.md)，现有代码的逐模块说明见 [模块说明](./docs/modules.md)。
 
 个人 CLI 的命令、配置安全、输出行为和后续开发路线见 [个人 CLI 设计](./docs/personal-cli-design.md)。
 

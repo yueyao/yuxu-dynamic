@@ -65,6 +65,8 @@ flowchart LR
 | [`docs/cli-release.md`](./cli-release.md) | CLI npm 包结构、版本、验证、Trusted Publisher 与发布流程 | 发布操作参考 |
 | [`docs/cli-installation.md`](./cli-installation.md) | CLI 安装、服务器配置、登录、环境变量与常见问题 | 使用者安装配置参考 |
 | [`docs/cli-release-notes.md`](./cli-release-notes.md) | 首个 CLI 预发布版本的能力、限制和验证结果 | `0.1.0-next.0` 发布说明 |
+| [`docs/server-task-design.md`](./server-task-design.md) | 客户端、任务控制面和服务端 Worker 的职责边界，以及外部资源定位规则 | 新应用任务接入参考 |
+| [`docs/podcast-transcription-task.md`](./podcast-transcription-task.md) | 播客页面解析、音频获取、转写、恢复和验收的长期需求 | `podcast-tools/audio/transcribe` 需求基线 |
 | [`README.md`](../README.md) | 操作者启动、登录、提交与下载步骤 |
 | [`AGENTS.md`](../AGENTS.md) | 开发协作约定和文档入口 |
 
