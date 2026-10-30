@@ -1,6 +1,6 @@
 # 共享应用平台总体方案
 
-详细的技术选择、接口、数据模型与阶段验收见 [详细设计](./detailed-design.md)；CLI 产品边界和开发路径见 [个人 CLI 设计](./personal-cli-design.md)；客户端、平台与服务端 Worker 的职责边界见 [服务端任务设计](./server-task-design.md)，具体的长期需求示例见 [播客转写 Task 需求](./podcast-transcription-task.md)；实际落地顺序见 [实现路径](./implementation-plan.md)；已实现代码的职责和调用关系见 [模块说明](./modules.md)。当前通用任务接口见 [任务底座调用与状态契约](./task-platform-flow.md)，时间查询验证用例见 [时间查询闭环](./time-query-flow.md)。
+详细的技术选择、接口、数据模型与阶段验收见 [详细设计](./detailed-design.md)；CLI 产品边界和开发路径见 [个人 CLI 设计](./personal-cli-design.md)；客户端、平台与服务端 Worker 的职责边界见 [服务端任务设计](./server-task-design.md)，播客场景的长期需求见 [播客转写 Task 需求](./podcast-transcription-task.md)，来源解析、转写引擎比较和首版选型见 [播客转写技术调研](./podcast-transcription-research.md)；实际落地顺序见 [实现路径](./implementation-plan.md)；已实现代码的职责和调用关系见 [模块说明](./modules.md)。当前通用任务接口见 [任务底座调用与状态契约](./task-platform-flow.md)，时间查询验证用例见 [时间查询闭环](./time-query-flow.md)。
 
 ## 1. 总体结构
 
