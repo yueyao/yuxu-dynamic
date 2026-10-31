@@ -10,6 +10,7 @@ flowchart LR
     WEB[应用后端] --> CLIENT[用户侧 Client SDK]
     CLIENT -->|用户 API| HTTP
     APP[示例 Worker] --> SDK[Worker SDK]
+    PODCAST[播客 Worker] --> SDK
     SDK -->|Worker API| HTTP
     HTTP --> STORE[Store]
     STORE --> DB[(SQLite)]
@@ -37,6 +38,11 @@ flowchart LR
 | [`apps/time-cli/src/main.ts`](../apps/time-cli/src/main.ts) | 独立时间查询客户端，配置服务器并等待 JSON 结果 | `main` / `npm run time-cli -- ...` |
 | [`apps/time-worker/src/main.ts`](../apps/time-worker/src/main.ts) | 服务器侧时间任务处理器 | `runTimeTaskOnce` / `npm run time-worker` |
 | [`apps/time-worker/manifest.json`](../apps/time-worker/manifest.json) | 时间服务的任务输入/输出声明 | `npm run register-app -- ...` |
+| [`apps/podcast-tools/manifest.json`](../apps/podcast-tools/manifest.json) | 播客转写的任务契约、超时和尝试上限 | `podcast-tools/audio/transcribe` |
+| [`apps/podcast-tools/src/main.ts`](../apps/podcast-tools/src/main.ts) | 播客 Worker 编排、检查点恢复、产物与进度 | `runPodcastTaskOnce` / `npm run podcast-worker` |
+| [`apps/podcast-tools/src/sources/xiaoyuzhou.ts`](../apps/podcast-tools/src/sources/xiaoyuzhou.ts) | 公开小宇宙单集 HTML 解析 | `resolveXiaoyuzhouEpisodeFromHtml` |
+| [`apps/podcast-tools/src/media/`](../apps/podcast-tools/src/media/) | SSRF 防护下载、音频探测、标准化和切片 | `SafeHttpClient`、`normalizeAudio`、`segmentAudio` |
+| [`apps/podcast-tools/src/transcription/`](../apps/podcast-tools/src/transcription/) | Provider 接口与 ElevenLabs Scribe v2 适配器 | `TranscriptionProvider`、`createElevenLabsProvider` |
 | [`packages/core/src/model.ts`](../packages/core/src/model.ts) | 示例任务定义、任务状态类型、输入规范化 | `exampleApp`、`TaskStatus`、`canonicalJson` |
 | [`packages/core/src/crypto.ts`](../packages/core/src/crypto.ts) | 随机 Token、摘要、密码哈希 | `newToken`、`sha256`、`hashPassword`、`verifyPassword` |
 | [`packages/core/src/schema.ts`](../packages/core/src/schema.ts) | 受控 JSON Schema 子集校验 | `JsonSchema`、`validateJsonSchema` |
@@ -47,6 +53,7 @@ flowchart LR
 | [`test/schema.test.ts`](../test/schema.test.ts) | schema、旧库升级和应用隔离测试 | `npm test` |
 | [`test/time-query.test.ts`](../test/time-query.test.ts) | 时间 CLI 到 Worker 的 JSON 结果集成测试 | `npm test` |
 | [`test/process-boundary.test.ts`](../test/process-boundary.test.ts) | CLI、API、Worker 三个独立进程的任务闭环测试 | `npm test` |
+| [`test/podcast-transcription.test.ts`](../test/podcast-transcription.test.ts) | 来源解析、下载安全、媒体处理、Provider、端到端产物和 attempt 恢复 | `npm test` |
 | [`test/support/ipc-api.ts`](../test/support/ipc-api.ts)、[`test/support/ipc-fetch.ts`](../test/support/ipc-fetch.ts) | 测试专用进程间请求桥接，复用生产 HTTP 路由 | 跨进程测试内部使用 |
 | [`scripts/smoke-time-query.sh`](../scripts/smoke-time-query.sh) | 独立进程真实 HTTP 联调脚本 | `npm run smoke:time` |
 | [`scripts/pack-cli.ts`](../scripts/pack-cli.ts) | 创建发布目录并生成可全局安装的 CLI npm 包 | `npm run pack:cli` |
@@ -58,8 +65,8 @@ flowchart LR
 
 | 文件 | 说明 |
 | --- | --- |
-| [`package.json`](../package.json) | Node 版本要求、启动命令、测试和类型检查脚本；运行时无第三方依赖 |
-| [`package-lock.json`](../package-lock.json) | TypeScript 与 Node 类型包的锁定版本 |
+| [`package.json`](../package.json) | Node 版本要求、启动命令、测试和类型检查脚本；播客 HTML 解析依赖 `parse5` |
+| [`package-lock.json`](../package-lock.json) | TypeScript、Node 类型包与 `parse5` 的锁定版本 |
 | [`tsconfig.json`](../tsconfig.json) | 严格类型检查、NodeNext 模块解析和 `.ts` 扩展名导入 |
 | [`tsconfig.cli.build.json`](../tsconfig.cli.build.json) | 仅编译 CLI 及用户侧 SDK，并把相对 `.ts` 导入改写为可发布的 `.js` 导入 |
 | [`docs/cli-release.md`](./cli-release.md) | CLI npm 包结构、版本、验证、Trusted Publisher 与发布流程 | 发布操作参考 |
@@ -179,9 +186,15 @@ SDK 当前是仓库内的 TypeScript 源码模块，由示例 Worker 使用相�
 
 `apps/time-cli/src/main.ts` 与 `apps/time-worker/src/main.ts` 形成独立的时间查询闭环。CLI 配置服务器地址、登录、提交任务并轮询结构化结果；Worker 在执行时读取本机 UTC 时间，通过 `completeWithOutput` 直接提交 JSON。任务声明见 `apps/time-worker/manifest.json`，完整步骤见 [时间查询闭环](./time-query-flow.md)。
 
+### 播客转写 Worker
+
+`apps/podcast-tools/src/main.ts` 处理 `podcast-tools/audio/transcribe` 的 `transcribe-v1` 版本。它重新解析公开小宇宙页面、流式下载音频并计算 SHA-256，再使用 `ffprobe`/`ffmpeg` 标准化为 16 kHz 单声道 FLAC 并切片。`TranscriptionProvider` 隔离具体转写服务，默认适配器调用 ElevenLabs Scribe v2。
+
+检查点保存非敏感来源元数据、音频摘要、标准化参数、切片计划和逐片转写，不保存签名媒体 URL 或 attempt 本地路径。新 attempt 会重建媒体文件、校验来源和切片计划，并跳过已确认的片段。成功时生成一份 Markdown 或 TXT 产物并返回结构化来源和音频摘要。当前仅支持公开小宇宙单集和固定时长切片，不支持全局说话人分离。
+
 ## 7. 测试、配置与当前限制
 
-`test/mvp.test.ts` 用进程内请求驱动真实 API 路由，覆盖登录、幂等提交、两个 Worker 同时领取、租约恢复、旧尝试拒绝、CLI 操作、产物下载、状态持久化、超时和平台连接中断。`test/schema.test.ts` 覆盖输入规则、旧库字段补齐、新应用注册及凭据隔离。`test/time-query.test.ts` 覆盖独立时间 CLI、时间 Worker、无产物 JSON 输出和服务器地址切换时的凭据保护。`test/process-boundary.test.ts` 启动三个独立进程，经测试专用 IPC 桥接生产 HTTP 路由，验证进程边界和 SQLite 持久化。运行 `npm test` 与 `npm run typecheck`。本机真实 HTTP 已由 `npm run smoke:time` 验收；反向代理与跨机器部署尚未验收。
+`test/mvp.test.ts` 用进程内请求驱动真实 API 路由，覆盖登录、幂等提交、两个 Worker 同时领取、租约恢复、旧尝试拒绝、CLI 操作、产物下载、状态持久化、超时和平台连接中断。`test/schema.test.ts` 覆盖输入规则、旧库字段补齐、新应用注册及凭据隔离。`test/time-query.test.ts` 覆盖独立时间 CLI、时间 Worker、无产物 JSON 输出和服务器地址切换时的凭据保护。`test/process-boundary.test.ts` 启动三个独立进程，经测试专用 IPC 桥接生产 HTTP 路由，验证进程边界和 SQLite 持久化。`test/podcast-transcription.test.ts` 额外覆盖小宇宙解析、下载限制、媒体处理、Provider 契约、端到端文字稿和换 attempt 恢复。运行 `npm test` 与 `npm run typecheck`。本机真实 HTTP 已由 `npm run smoke:time` 验收；真实 ElevenLabs 计费 API、反向代理与跨机器部署尚未验收。
 
 | 配置 | 使用位置 | 默认值或作用 |
 | --- | --- | --- |
@@ -197,5 +210,11 @@ SDK 当前是仓库内的 TypeScript 源码模块，由示例 Worker 使用相�
 | `PLATFORM_LEASE_MS`、`PLATFORM_SWEEP_MS` | API | 分别为 60000、5000 毫秒 |
 | `WORKER_HEARTBEAT_MS`、`WORKER_POLL_MS` | 示例 Worker | 分别为 15000、2000 毫秒 |
 | `EXAMPLE_TASK_DELAY_MS` | 示例 Worker | 每个示例步骤等待 1500 毫秒 |
+| `PODCAST_WORKER_TOKEN` | 播客 Worker | 覆盖 `.local/worker-token-podcast-tools` |
+| `PODCAST_WORK_DIR` | 播客 Worker | 临时音频和切片工作目录 |
+| `PODCAST_MAX_PAGE_BYTES`、`PODCAST_MAX_AUDIO_BYTES`、`PODCAST_MAX_DURATION_SECONDS` | 播客 Worker | 页面、音频字节和时长上限 |
+| `PODCAST_PAGE_TIMEOUT_MS`、`PODCAST_DOWNLOAD_TIMEOUT_MS` | 播客 Worker | 页面和音频请求超时 |
+| `PODCAST_SEGMENT_SECONDS` | 播客 Worker | 切片最大时长，默认 300 秒 |
+| `ELEVENLABS_API_KEY`、`TRANSCRIPTION_MODEL` | 播客 Worker | ElevenLabs 凭据和模型；默认 `scribe_v2` |
 
 当前尚无 PostgreSQL 队列、对象存储、Web 会话、取消/重试、周期性定时任务、webhook、管理台、通用数据服务，以及同一应用的发布版本切换。维护这些模块时，请先区分此处的已实现行为和 [详细设计](./detailed-design.md) 中的目标方案。

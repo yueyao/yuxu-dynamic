@@ -6,7 +6,7 @@
 | 适用任务 | `podcast-tools/audio/transcribe` |
 | 关联需求 | [播客转写 Task 需求](./podcast-transcription-task.md) |
 | 架构边界 | [服务端任务设计](./server-task-design.md) |
-| 最后更新 | 2026-10-30 |
+| 最后更新 | 2026-10-31 |
 
 本文记录公开播客链接解析、音频获取、预处理、语音转写、时间戳和说话人分离方案的调研结果，并给出适合玉虚任务平台的首版实现建议。本文维护技术事实、候选方案和选型理由；产品输入输出、错误语义与验收标准以播客转写 Task 需求为准。
 
@@ -369,12 +369,16 @@ artifact-uploaded
 
 ### P0：来源和媒体链路
 
+状态：已完成首版实现与自动化测试。
+
 - 建立 `podcast-tools` Worker 包和任务 manifest。
 - 实现 `XiaoyuzhouSourceAdapter` 及固定 HTML fixture 测试。
 - 实现安全流式下载、SHA-256、`ffprobe` 和工作目录清理。
 - 只验证来源检查点、进度和失败错误，不调用真实转写服务。
 
 ### P1：首个端到端 Provider
+
+状态：已完成 Provider 契约、ElevenLabs Scribe v2 适配器、分片恢复、合并和单产物闭环的实现与 mock 验证；未进行真实计费 API 验收。`transcribe-v1` 实际使用固定最大时长、无重叠的逐片编码，VAD/静音边界和重叠去重顺延至 P2 质量评测。
 
 - 定义 Provider 能力契约和规范化结果模型。
 - 接入 ElevenLabs Scribe v2。

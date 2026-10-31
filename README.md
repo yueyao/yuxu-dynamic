@@ -12,7 +12,8 @@
 
 ## 环境要求
 
-- Node.js 24 或更新版本。运行时只使用 Node.js 内置模块；`npm ci` 仅用于安装 TypeScript 类型检查依赖。
+- Node.js 24 或更新版本，并通过 `npm ci` 安装锁定依赖。平台主体使用 Node.js 内置模块；播客来源适配器使用 `parse5` 解析 HTML。
+- 运行播客转写 Worker 时需要可在 `PATH` 中调用的 `ffmpeg` 和 `ffprobe`。
 - 当前 MVP 在本机使用 SQLite 和 `.local/artifacts/`，无需 PostgreSQL、Docker 或对象存储。
 
 ## 启动
@@ -83,6 +84,38 @@ yuxu config show
 
 需要指定一次性执行时间时，提交命令追加 `--run-at 2026-10-26T08:00:00+08:00`；需要安全重试提交时追加 `--idempotency-key <key>`。`tasks list <app-id>` 查看任务定义，`tasks history` 查看已提交的任务实例；历史响应中的 `next_cursor` 可通过 `--cursor` 读取下一页。应用后端可导入 [`PlatformClient`](./packages/client-sdk/src/index.ts) 调用同一套用户 API。当前没有 Web 会话，浏览器页面应经应用后端调用平台。
 
+## 播客转写 Task
+
+`podcast-tools/audio/transcribe` 接受公开小宇宙单集 URL。CLI 只提交链接和基本选项；页面解析、音频下载、转码、切片、转写和产物生成均在服务端 Worker 执行。
+
+完成平台初始化后，先注册任务声明（每个本地数据库只需一次）：
+
+```sh
+npm run register-app -- apps/podcast-tools/manifest.json
+```
+
+启动 API，再在另一终端安全设置 ElevenLabs 凭据并启动 Worker。凭据只由 Worker 读取，不应写入任务输入或仓库：
+
+```sh
+npm run server
+```
+
+```sh
+export ELEVENLABS_API_KEY='<your-api-key>'
+npm run podcast-worker
+```
+
+提交并等待转写任务：
+
+```sh
+npm run yuxu -- task run podcast-tools/audio/transcribe \
+  --input-json '{"source_url":"https://www.xiaoyuzhoufm.com/episode/EPISODE_ID"}' \
+  --idempotency-key podcast-EPISODE_ID-v1 \
+  --wait --timeout 21600
+```
+
+成功后用 `task result TASK_ID` 读取 `artifact_id`，再用 `artifact download ARTIFACT_ID --out transcript.md` 下载文字稿。当前仅支持公开小宇宙单集，默认调用 ElevenLabs Scribe v2，使用固定最大时长切片；`speaker_diarization=true` 会以稳定错误明确拒绝。生产默认 Provider 仍需中文样本评测后确定。完整契约、限制与恢复语义见 [播客转写 Task 需求](./docs/podcast-transcription-task.md)。
+
 ## 验证与配置
 
 ```sh
@@ -91,7 +124,7 @@ npm ci
 npm run typecheck
 ```
 
-测试使用进程内 HTTP 请求，不需要开放本机端口。API 只绑定本机回环地址。可配置 `PLATFORM_DATA_DIR`、`YUXU_CLI_DIR`（旧名 `PLATFORM_CLI_DIR`）、`PORT`、`PLATFORM_LEASE_MS`、`PLATFORM_SWEEP_MS`、`WORKER_HEARTBEAT_MS`、`WORKER_POLL_MS` 和 `EXAMPLE_TASK_DELAY_MS`。缩短租约做恢复演示时，心跳间隔应明显短于租约。
+测试使用进程内 HTTP 请求，不需要开放本机端口。API 只绑定本机回环地址。通用配置包括 `PLATFORM_DATA_DIR`、`YUXU_CLI_DIR`（旧名 `PLATFORM_CLI_DIR`）、`PORT`、`PLATFORM_LEASE_MS`、`PLATFORM_SWEEP_MS`、`WORKER_HEARTBEAT_MS` 和 `WORKER_POLL_MS`。播客 Worker 另支持 `PODCAST_WORKER_TOKEN`、`PODCAST_WORK_DIR`、`PODCAST_MAX_PAGE_BYTES`、`PODCAST_MAX_AUDIO_BYTES`、`PODCAST_MAX_DURATION_SECONDS`、`PODCAST_PAGE_TIMEOUT_MS`、`PODCAST_DOWNLOAD_TIMEOUT_MS`、`PODCAST_SEGMENT_SECONDS`、`ELEVENLABS_API_KEY` 和 `TRANSCRIPTION_MODEL`。缩短租约做恢复演示时，心跳间隔应明显短于租约。
 
 本地 MVP 自带 `example-app/report/build` 文本任务，也可注册其他应用的任务声明。任务输入和输出使用受控 JSON Schema 子集校验，Worker 通信与检查点已抽成通用 SDK。SQLite、本地文件和 `scrypt` 仍分别需要迁移到 PostgreSQL、对象存储和成熟认证库；详见 [实现路径](./docs/implementation-plan.md)。
 

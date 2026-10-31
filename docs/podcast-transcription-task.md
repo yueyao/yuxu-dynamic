@@ -2,14 +2,20 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Draft，作为首版实现与后续演进基线 |
+| 状态 | Implemented V1 baseline，需求与演进长期维护 |
 | 应用 | `podcast-tools` |
 | Task | `audio/transcribe` |
 | 完整任务名 | `podcast-tools/audio/transcribe` |
 | 当前目标版本 | `transcribe-v1` |
-| 最后更新 | 2026-10-30 |
+| 最后更新 | 2026-10-31 |
 
 本文长期维护播客转写任务的产品范围、任务契约、服务端执行流程、安全边界、恢复语义和验收标准。架构总原则见 [服务端任务设计](./server-task-design.md)，来源解析、转写引擎比较和首版技术选型见 [播客转写技术调研](./podcast-transcription-research.md)：CLI 或 Web 应用只提交基本数据和播客页面链接，页面解析、音频定位、下载、转码和转写都由服务端 `podcast-tools` Worker 完成。
+
+### 当前实现快照
+
+`transcribe-v1` 已实现可运行的服务端基线：任务 manifest、小宇宙 `__NEXT_DATA__` 解析、SSRF 防护的流式下载、SHA-256、`ffprobe`/`ffmpeg`、16 kHz 单声道 FLAC、分片检查点、ElevenLabs Scribe v2 Provider 适配器、Markdown/TXT 单产物和结构化输出。恢复时会重新解析页面、下载并重建当前 attempt 的媒体文件，校验已确认音频摘要和切片计划，并跳过已确认的转写片段。检查点不保存带签名媒体 URL 或 attempt 本地路径。
+
+当前已知边界：仅支持公开小宇宙单集；切片为可配置的固定最大时长，尚未实现 VAD/静音边界和重叠片段；`speaker_diarization=true` 明确失败；`quality` 尚未映射到不同 Provider/模型；ElevenLabs 仅完成 mock 边界契约验证，真实计费 API、中文准确率、数据区域和保留策略仍需部署者验证。
 
 ## 1. 背景与目标
 
@@ -335,22 +341,22 @@ Markdown 产物建议格式：
 
 ## 12. 配置项
 
-建议由 Worker 部署配置提供：
+当前 Worker 部署配置：
 
 | 配置 | 说明 |
 | --- | --- |
-| `PODCAST_SOURCE_ADAPTERS` | 启用的来源适配器列表 |
-| `PODCAST_ALLOWED_HOSTS` | 允许的页面和媒体 host 范围 |
+| `PODCAST_WORKER_TOKEN` | 覆盖平台注册时生成的播客 Worker Token 文件 |
+| `PODCAST_WORK_DIR` | 当前 attempt 的临时音频和切片工作目录 |
+| `PODCAST_MAX_PAGE_BYTES` | 单集 HTML 最大字节数，默认 5 MiB |
 | `PODCAST_MAX_AUDIO_BYTES` | 最大下载字节数 |
-| `PODCAST_MAX_DURATION_SECONDS` | 最大音频时长 |
-| `PODCAST_DOWNLOAD_TIMEOUT_MS` | 总下载超时 |
-| `PODCAST_SEGMENT_SECONDS` | 默认切片长度 |
-| `PODCAST_WORK_DIR` | 临时工作目录 |
-| `TRANSCRIPTION_PROVIDER` | 转写引擎适配器名称 |
-| `TRANSCRIPTION_MODEL` | 服务端模型配置，不进入用户输入 |
-| `TRANSCRIPTION_CONCURRENCY` | 单任务内片段并发数 |
+| `PODCAST_MAX_DURATION_SECONDS` | 最大音频时长，默认 21600 秒 |
+| `PODCAST_PAGE_TIMEOUT_MS` | 页面请求超时，默认 30000 毫秒 |
+| `PODCAST_DOWNLOAD_TIMEOUT_MS` | 媒体请求超时，默认 1800000 毫秒 |
+| `PODCAST_SEGMENT_SECONDS` | 切片最大时长，默认 300 秒 |
+| `ELEVENLABS_API_KEY` | ElevenLabs API 凭据，必填且不进入任务输入 |
+| `TRANSCRIPTION_MODEL` | ElevenLabs 模型，默认 `scribe_v2` |
 
-实际变量名在实现时固定，并同步更新部署说明。敏感值不得写入仓库。
+当前来源 Adapter 和 Provider 均由 `transcribe-v1` 固定，未暴露可运行时切换的配置。敏感值不得写入仓库。
 
 ## 13. 可观测性
 
@@ -428,5 +434,7 @@ Markdown 产物建议格式：
 | 2026-10-30 | 首版只返回一份文字稿产物 | 匹配当前单产物能力，先验证完整任务闭环 |
 | 2026-10-30 | 小宇宙解析优先使用公开页面 `__NEXT_DATA__`，回退到 `og:audio` 和通用 RSS enclosure | 已验证公开样本包含可用音频信息；多级回退降低单一页面字段变化的影响 |
 | 2026-10-30 | 转写引擎使用能力可声明的 Provider 接口，首个云端接入候选为 ElevenLabs Scribe v2 | 先快速验证端到端链路，同时保留 Deepgram、FunASR 和 faster-whisper 的替换与评测空间 |
+| 2026-10-31 | `transcribe-v1` 先落地固定最大时长的逐片编码，默认 300 秒、无重叠 | 先验证恢复和产物闭环；VAD、重叠及边界模糊去重需中文样本评测后定参 |
+| 2026-10-31 | V1 显式拒绝 `speaker_diarization=true` | 分片内 speaker 标签不能冒充全局一致说话人 |
 | 2026-10-30 | V1 默认关闭说话人分离 | 分片内匿名说话人标签不能直接跨片段合并，需要全局 diarization 方案 |
 

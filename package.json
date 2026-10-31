@@ -18,6 +18,7 @@
     "worker": "node apps/example-app/src/worker.ts",
     "time-worker": "node apps/time-worker/src/main.ts",
     "time-cli": "node apps/time-cli/src/main.ts",
+    "podcast-worker": "node apps/podcast-tools/src/main.ts",
     "smoke:time": "bash scripts/smoke-time-query.sh",
     "build:cli": "node scripts/build-cli.ts",
     "pack:cli": "node scripts/pack-cli.ts",
@@ -30,5 +31,8 @@
   "devDependencies": {
     "@types/node": "25.5.0",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "parse5": "^8.0.1"
   }
 }

@@ -2,7 +2,7 @@
 
 总体架构见 [总体方案](./index.md)，完整目标见 [详细设计](./detailed-design.md)。本文件记录实际落地顺序与当前 MVP 的取舍。
 
-当前进度：M0 本地任务闭环已实现；其中时间任务完成本机真实 HTTP 验收，较长任务的恢复与产物下载由自动化测试覆盖。M1 已抽出通用 Worker SDK、加入受控的任务输入/输出 schema、旧 SQLite 数据升级及本地应用声明导入。个人 CLI 已拆为独立 npm 包，支持隔离安装验证，并配置了基于 GitHub Actions OIDC 的发布工作流；npm 名称确认与 Trusted Publisher 配置待发布者完成。PostgreSQL 与 S3 兼容存储尚未实现和联调。
+当前进度：M0 本地任务闭环已实现；其中时间任务完成本机真实 HTTP 验收，较长任务的恢复与产物下载由自动化测试覆盖。播客转写 Task 已完成 `transcribe-v1` 实现基线：客户端只提交公开小宇宙 URL，服务端 Worker 完成解析、安全下载、转码、切片、ElevenLabs Provider 调用、恢复检查点和文字稿产物；真实付费 API 和中文质量评测尚未执行。M1 已抽出通用 Worker SDK、加入受控的任务输入/输出 schema、旧 SQLite 数据升级及本地应用声明导入。个人 CLI 已拆为独立 npm 包，支持隔离安装验证，并配置了基于 GitHub Actions OIDC 的发布工作流；npm 名称确认与 Trusted Publisher 配置待发布者完成。PostgreSQL 与 S3 兼容存储尚未实现和联调。
 
 验证用例使用独立时间查询 CLI 和 Worker：CLI 可配置服务器地址并提交时间任务，Worker 以 JSON 返回执行机器的 UTC 时间。自动化测试覆盖进程内 HTTP 路由和三个独立进程的 IPC 测试。2026-10-26，用户在普通本机终端运行 `npm run smoke:time`，回传任务 `bf116fe5-79d5-483c-927b-aa159491fc75` 的成功结果 `2026-10-26T06:01:39.577Z`（UTC），证明本机独立进程的真实 HTTP 链路已打通。跨机器部署和 HTTPS 入口尚未验收。链路说明见 [时间查询闭环](./time-query-flow.md)。
 
@@ -36,6 +36,14 @@ M0 包含：
 M0 暂不包含 Web 会话、输入附件、SSE、自动重试、取消、周期性定时计划、webhook、通用数据服务、管理台和多应用发布。这些保持在总体方案对应阶段。首版终端查看进度使用事件游标轮询；M1 可在同一事件模型上加入 SSE。
 
 个人 CLI 的命令结构、配置安全、使用边界和 C1–C3 演进顺序见 [个人 CLI 设计](./personal-cli-design.md)。当前 C1 已落地服务器配置、origin 凭据隔离、三种 JSON 输入、提交等待、历史和结果操作。
+
+### 播客转写实现边界
+
+- 已实现专用小宇宙 HTML Adapter，使用 `parse5` 解析 `__NEXT_DATA__`，并在单集数据缺少音频字段时使用 `og:audio`。通用 RSS 和其他平台适配器尚未实现。
+- 已实现逐跳 HTTPS/DNS/IP 校验、流式下载与字节上限、SHA-256、`ffprobe`、16 kHz 单声道 FLAC 标准化和工作目录清理。
+- `transcribe-v1` 使用固定最大时长、无重叠的逐片编码；VAD/静音边界、重叠及模糊文本去重留在质量评测阶段。
+- 来源、音频摘要、标准化参数、切片计划和逐片文字作为不可变检查点；本机临时路径不进检查点。新 attempt 会重建媒体文件并跳过已确认的 Provider 片段。
+- 默认 Provider 适配器为 ElevenLabs Scribe v2，但当前只通过 mock HTTP 边界验证 multipart 契约，未使用真实 API key 做计费请求。`quality` 在当前 release 中为向后兼容选项，Provider/模型由 Worker 部署配置固定。
 
 ## M0 验收
 
