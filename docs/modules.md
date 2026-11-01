@@ -11,6 +11,7 @@ flowchart LR
     CLIENT -->|用户 API| HTTP
     APP[示例 Worker] --> SDK[Worker SDK]
     PODCAST[播客 Worker] --> SDK
+    PODCAST -->|内网推理| ASR[FunASR / SenseVoiceSmall]
     SDK -->|Worker API| HTTP
     HTTP --> STORE[Store]
     STORE --> DB[(SQLite)]
@@ -42,7 +43,11 @@ flowchart LR
 | [`apps/podcast-tools/src/main.ts`](../apps/podcast-tools/src/main.ts) | 播客 Worker 编排、检查点恢复、产物与进度 | `runPodcastTaskOnce` / `npm run podcast-worker` |
 | [`apps/podcast-tools/src/sources/xiaoyuzhou.ts`](../apps/podcast-tools/src/sources/xiaoyuzhou.ts) | 公开小宇宙单集 HTML 解析 | `resolveXiaoyuzhouEpisodeFromHtml` |
 | [`apps/podcast-tools/src/media/`](../apps/podcast-tools/src/media/) | SSRF 防护下载、音频探测、标准化和切片 | `SafeHttpClient`、`normalizeAudio`、`segmentAudio` |
-| [`apps/podcast-tools/src/transcription/`](../apps/podcast-tools/src/transcription/) | Provider 接口与 ElevenLabs Scribe v2 适配器 | `TranscriptionProvider`、`createElevenLabsProvider` |
+| [`apps/podcast-tools/src/transcription/provider.ts`](../apps/podcast-tools/src/transcription/provider.ts) | Provider 能力、规范化结果和通用 HTTP 错误契约 | `TranscriptionProvider`、`TranscriptionProviderError` |
+| [`apps/podcast-tools/src/transcription/funasr.ts`](../apps/podcast-tools/src/transcription/funasr.ts) | 自托管 FunASR HTTP 适配器与时间戳归一化 | `createFunASRProvider`、`FunASRError` |
+| [`apps/podcast-tools/src/transcription/configured.ts`](../apps/podcast-tools/src/transcription/configured.ts) | 按部署环境选择并配置转写 Provider | `createConfiguredTranscriptionProvider` |
+| [`apps/podcast-tools/src/transcription/elevenlabs.ts`](../apps/podcast-tools/src/transcription/elevenlabs.ts) | 显式可选的 ElevenLabs Scribe v2 兼容适配器 | `createElevenLabsProvider` |
+| [`deploy/funasr/`](../deploy/funasr/) | FunASR 1.4.19 + SenseVoiceSmall 的 CPU Docker/Compose 部署基线 | `npm run asr:config`、`npm run asr:up` |
 | [`packages/core/src/model.ts`](../packages/core/src/model.ts) | 示例任务定义、任务状态类型、输入规范化 | `exampleApp`、`TaskStatus`、`canonicalJson` |
 | [`packages/core/src/crypto.ts`](../packages/core/src/crypto.ts) | 随机 Token、摘要、密码哈希 | `newToken`、`sha256`、`hashPassword`、`verifyPassword` |
 | [`packages/core/src/schema.ts`](../packages/core/src/schema.ts) | 受控 JSON Schema 子集校验 | `JsonSchema`、`validateJsonSchema` |
@@ -69,11 +74,13 @@ flowchart LR
 | [`package-lock.json`](../package-lock.json) | TypeScript、Node 类型包与 `parse5` 的锁定版本 |
 | [`tsconfig.json`](../tsconfig.json) | 严格类型检查、NodeNext 模块解析和 `.ts` 扩展名导入 |
 | [`tsconfig.cli.build.json`](../tsconfig.cli.build.json) | 仅编译 CLI 及用户侧 SDK，并把相对 `.ts` 导入改写为可发布的 `.js` 导入 |
+| [`.dockerignore`](../.dockerignore) | 将 FunASR 镜像构建上下文限制为 Dockerfile 和 Python 依赖清单 |
 | [`docs/cli-release.md`](./cli-release.md) | CLI npm 包结构、版本、验证、Trusted Publisher 与发布流程 | 发布操作参考 |
 | [`docs/cli-installation.md`](./cli-installation.md) | CLI 安装、服务器配置、登录、环境变量与常见问题 | 使用者安装配置参考 |
 | [`docs/cli-release-notes.md`](./cli-release-notes.md) | 首个 CLI 预发布版本的能力、限制和验证结果 | `0.1.0-next.0` 发布说明 |
 | [`docs/server-task-design.md`](./server-task-design.md) | 客户端、任务控制面和服务端 Worker 的职责边界，以及外部资源定位规则 | 新应用任务接入参考 |
 | [`docs/podcast-transcription-task.md`](./podcast-transcription-task.md) | 播客页面解析、音频获取、转写、恢复和验收的长期需求 | `podcast-tools/audio/transcribe` 需求基线 |
+| [`docs/self-hosted-asr.md`](./self-hosted-asr.md) | 自托管 FunASR 的部署、安全边界、配置、许可与验收状态 | ASR 运维参考 |
 | [`README.md`](../README.md) | 操作者启动、登录、提交与下载步骤 |
 | [`AGENTS.md`](../AGENTS.md) | 开发协作约定和文档入口 |
 
@@ -188,13 +195,13 @@ SDK 当前是仓库内的 TypeScript 源码模块，由示例 Worker 使用相�
 
 ### 播客转写 Worker
 
-`apps/podcast-tools/src/main.ts` 处理 `podcast-tools/audio/transcribe` 的 `transcribe-v1` 版本。它重新解析公开小宇宙页面、流式下载音频并计算 SHA-256，再使用 `ffprobe`/`ffmpeg` 标准化为 16 kHz 单声道 FLAC 并切片。`TranscriptionProvider` 隔离具体转写服务，默认适配器调用 ElevenLabs Scribe v2。
+`apps/podcast-tools/src/main.ts` 处理 `podcast-tools/audio/transcribe` 的 `transcribe-v1` 版本。它重新解析公开小宇宙页面、流式下载音频并计算 SHA-256，再使用 `ffprobe`/`ffmpeg` 标准化为 16 kHz 单声道 FLAC 并切片。`TranscriptionProvider` 隔离具体转写服务；默认适配器调用仅对 Worker 开放的 FunASR/SenseVoiceSmall 内网服务，ElevenLabs Scribe v2 仅在部署者显式配置时启用。Python 模型服务属于应用执行面，不持有 Worker Token，也不访问平台数据库。
 
 检查点保存非敏感来源元数据、音频摘要、标准化参数、切片计划和逐片转写，不保存签名媒体 URL 或 attempt 本地路径。新 attempt 会重建媒体文件、校验来源和切片计划，并跳过已确认的片段。成功时生成一份 Markdown 或 TXT 产物并返回结构化来源和音频摘要。当前仅支持公开小宇宙单集和固定时长切片，不支持全局说话人分离。
 
 ## 7. 测试、配置与当前限制
 
-`test/mvp.test.ts` 用进程内请求驱动真实 API 路由，覆盖登录、幂等提交、两个 Worker 同时领取、租约恢复、旧尝试拒绝、CLI 操作、产物下载、状态持久化、超时和平台连接中断。`test/schema.test.ts` 覆盖输入规则、旧库字段补齐、新应用注册及凭据隔离。`test/time-query.test.ts` 覆盖独立时间 CLI、时间 Worker、无产物 JSON 输出和服务器地址切换时的凭据保护。`test/process-boundary.test.ts` 启动三个独立进程，经测试专用 IPC 桥接生产 HTTP 路由，验证进程边界和 SQLite 持久化。`test/podcast-transcription.test.ts` 额外覆盖小宇宙解析、下载限制、媒体处理、Provider 契约、端到端文字稿和换 attempt 恢复。运行 `npm test` 与 `npm run typecheck`。本机真实 HTTP 已由 `npm run smoke:time` 验收；真实 ElevenLabs 计费 API、反向代理与跨机器部署尚未验收。
+`test/mvp.test.ts` 用进程内请求驱动真实 API 路由，覆盖登录、幂等提交、两个 Worker 同时领取、租约恢复、旧尝试拒绝、CLI 操作、产物下载、状态持久化、超时和平台连接中断。`test/schema.test.ts` 覆盖输入规则、旧库字段补齐、新应用注册及凭据隔离。`test/time-query.test.ts` 覆盖独立时间 CLI、时间 Worker、无产物 JSON 输出和服务器地址切换时的凭据保护。`test/process-boundary.test.ts` 启动三个独立进程，经测试专用 IPC 桥接生产 HTTP 路由，验证进程边界和 SQLite 持久化。`test/podcast-transcription.test.ts` 额外覆盖小宇宙解析、下载限制、媒体处理、FunASR Provider 契约、端到端文字稿和换 attempt 恢复。运行 `npm test` 与 `npm run typecheck`。本机真实 HTTP 已由 `npm run smoke:time` 验收；FunASR Compose 配置已校验，但真实镜像构建、SenseVoiceSmall 推理、反向代理与跨机器部署尚未验收。
 
 | 配置 | 使用位置 | 默认值或作用 |
 | --- | --- | --- |
@@ -215,6 +222,10 @@ SDK 当前是仓库内的 TypeScript 源码模块，由示例 Worker 使用相�
 | `PODCAST_MAX_PAGE_BYTES`、`PODCAST_MAX_AUDIO_BYTES`、`PODCAST_MAX_DURATION_SECONDS` | 播客 Worker | 页面、音频字节和时长上限 |
 | `PODCAST_PAGE_TIMEOUT_MS`、`PODCAST_DOWNLOAD_TIMEOUT_MS` | 播客 Worker | 页面和音频请求超时 |
 | `PODCAST_SEGMENT_SECONDS` | 播客 Worker | 切片最大时长，默认 300 秒 |
-| `ELEVENLABS_API_KEY`、`TRANSCRIPTION_MODEL` | 播客 Worker | ElevenLabs 凭据和模型；默认 `scribe_v2` |
+| `TRANSCRIPTION_PROVIDER` | 播客 Worker | 默认 `funasr`；显式设为 `elevenlabs` 才启用付费兼容 Provider |
+| `FUNASR_BASE_URL`、`FUNASR_DEPLOYMENT_ID` | 播客 Worker | 默认 `http://127.0.0.1:8000` 和 `funasr-1.4.19-cpu` |
+| `TRANSCRIPTION_MODEL`、`TRANSCRIPTION_REQUEST_TIMEOUT_MS` | 播客 Worker | 请求模型和单片转写超时；FunASR 默认模型为 `sensevoice` |
+| `FUNASR_API_TOKEN` | 播客 Worker | 可选内网网关 Bearer Token；官方 FunASR 服务自身无鉴权 |
+| `ELEVENLABS_API_KEY` | 播客 Worker | 仅选择 `elevenlabs` Provider 时必填 |
 
 当前尚无 PostgreSQL 队列、对象存储、Web 会话、取消/重试、周期性定时任务、webhook、管理台、通用数据服务，以及同一应用的发布版本切换。维护这些模块时，请先区分此处的已实现行为和 [详细设计](./detailed-design.md) 中的目标方案。

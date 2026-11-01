@@ -13,7 +13,9 @@ import { normalizeAudio, probeAudio } from '../apps/podcast-tools/src/media/audi
 import { SafeHttpClient } from '../apps/podcast-tools/src/media/safe-http.ts';
 import { executePodcastLease, runPodcastTaskOnce } from '../apps/podcast-tools/src/main.ts';
 import { resolveXiaoyuzhouEpisodeFromHtml } from '../apps/podcast-tools/src/sources/xiaoyuzhou.ts';
-import { createElevenLabsProvider, ElevenLabsError } from '../apps/podcast-tools/src/transcription/elevenlabs.ts';
+import { createElevenLabsProvider } from '../apps/podcast-tools/src/transcription/elevenlabs.ts';
+import { createFunASRProvider, FunASRError } from '../apps/podcast-tools/src/transcription/funasr.ts';
+import { createConfiguredTranscriptionProvider } from '../apps/podcast-tools/src/transcription/configured.ts';
 import type { TranscriptionProvider } from '../apps/podcast-tools/src/transcription/provider.ts';
 import { parseManifest } from '../packages/core/src/manifest.ts';
 import { Store } from '../packages/core/src/store.ts';
@@ -194,6 +196,83 @@ test('ElevenLabs Provider 发送音频并归一化词级时间戳', async () => 
   }
 });
 
+test('FunASR Provider 调用自托管服务并归一化分段', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'podcast-funasr-'));
+  const audioPath = join(dir, 'segment.flac');
+  await writeFile(audioPath, Buffer.from('fake-flac'));
+  const fetchImpl: typeof fetch = async (input, init) => {
+    assert.equal(String(input), 'http://127.0.0.1:8000/v1/audio/transcriptions');
+    assert.ok(init?.body instanceof FormData);
+    assert.equal(init.body.get('model'), 'sensevoice');
+    assert.equal(init.body.get('language'), 'zh');
+    assert.equal(init.body.get('response_format'), 'verbose_json');
+    assert.equal(init.body.has('spk'), false);
+    assert.ok(init.body.get('file') instanceof Blob);
+    return Response.json({
+      task: 'transcribe',
+      language: 'zh',
+      duration: 0.8,
+      text: '你好世界',
+      segments: [{
+        id: 0,
+        start: 0,
+        end: 0.8,
+        text: '你好世界',
+        words: [
+          { word: '你好', start: 0, end: 0.4 },
+          { word: '世界', start: 0.4, end: 0.8 },
+        ],
+      }],
+    });
+  };
+
+  try {
+    const provider = createFunASRProvider({ fetchImpl });
+    const result = await provider.transcribe({
+      audioPath,
+      language: 'zh',
+      timestamps: 'segment',
+      diarization: false,
+      requestKey: 'task:segment:0',
+    });
+    assert.equal(provider.name, 'funasr');
+    assert.equal(provider.model, 'sensevoice');
+    assert.deepEqual(result, {
+      text: '你好世界',
+      language: 'zh',
+      durationSeconds: 0.8,
+      segments: [{
+        startMs: 0,
+        endMs: 800,
+        text: '你好世界',
+        words: [
+          { startMs: 0, endMs: 400, text: '你好' },
+          { startMs: 400, endMs: 800, text: '世界' },
+        ],
+      }],
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('自托管 FunASR 是默认 Provider，付费 Provider 需显式启用', () => {
+  const local = createConfiguredTranscriptionProvider({});
+  assert.equal(local.name, 'funasr');
+  assert.equal(local.model, 'sensevoice@funasr-1.4.19-cpu');
+
+  const paid = createConfiguredTranscriptionProvider({
+    TRANSCRIPTION_PROVIDER: 'elevenlabs',
+    ELEVENLABS_API_KEY: 'test-key',
+  });
+  assert.equal(paid.name, 'elevenlabs');
+  assert.equal(paid.model, 'scribe_v2');
+
+  assert.throws(() => createConfiguredTranscriptionProvider({
+    TRANSCRIPTION_PROVIDER: 'unknown',
+  }), /TRANSCRIPTION_CONFIG_INVALID/);
+});
+
 test('播客 URL 任务由服务端 Worker 生成可下载文字稿', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'podcast-task-'));
   const store = new Store(join(dir, 'platform.sqlite'));
@@ -306,7 +385,7 @@ test('新 Worker attempt 重建媒体文件并跳过已确认的转写片段', a
   const store = new Store(join(dir, 'platform.sqlite'));
   const server = createApiServer(store, {
     artifactDir: join(dir, 'artifacts'),
-    leaseMs: 80,
+    leaseMs: 60_000,
     requestLog: () => {},
   });
   const fetchImpl = localFetch(server);
@@ -327,7 +406,7 @@ test('新 Worker attempt 重建媒体文件并跳过已确认的转写片段', a
       const file = input.audioPath.slice(input.audioPath.lastIndexOf('/') + 1);
       transcribedFiles.push(file);
       if (transcribedFiles.length === 2) {
-        throw new ElevenLabsError(429, 'TRANSCRIPTION_FAILED: 模拟 Provider 限流');
+        throw new FunASRError(503, 'TRANSCRIPTION_FAILED: 模拟自托管 Provider 暂时不可用');
       }
       return {
         text: `转写 ${file}`,
@@ -345,7 +424,7 @@ test('新 Worker attempt 重建媒体文件并跳过已确认的转写片段', a
     }, null).task;
     const options = {
       baseUrl: 'http://platform.local', token: workerToken, fetchImpl,
-      workspaceRoot: join(dir, 'work'), provider, heartbeatMs: 10, segmentSeconds: 1,
+      workspaceRoot: join(dir, 'work'), provider, heartbeatMs: 1_000, segmentSeconds: 1,
       resolveEpisode: async (url: string) => {
         resolveCount += 1;
         return resolveXiaoyuzhouEpisodeFromHtml(url, html);
@@ -363,7 +442,7 @@ test('新 Worker attempt 重建媒体文件并跳过已确认的转写片段', a
       },
     };
 
-    await assert.rejects(runPodcastTaskOnce(options), /Provider 限流/);
+    await assert.rejects(runPodcastTaskOnce(options), /Provider 暂时不可用/);
     const interrupted = store.getTask(task.task_id);
     assert.equal(interrupted.status, 'running');
     const firstAttemptId = store.getEvents(task.task_id).find((event) =>
@@ -372,8 +451,7 @@ test('新 Worker attempt 重建媒体文件并跳过已确认的转写片段', a
     await assert.rejects(access(join(dir, 'work', task.task_id, firstAttemptId)),
       { code: 'ENOENT' });
 
-    await new Promise((done) => setTimeout(done, 100));
-    store.recoverExpired();
+    store.recoverExpired(Date.now() + 60_001);
     assert.equal(store.getTask(task.task_id).status, 'recovering');
     const recoveredLease = store.lease('podcast-tools', 'transcribe-v1', 60_000);
     assert.ok(recoveredLease);

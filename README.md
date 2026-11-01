@@ -94,14 +94,29 @@ yuxu config show
 npm run register-app -- apps/podcast-tools/manifest.json
 ```
 
-启动 API，再在另一终端安全设置 ElevenLabs 凭据并启动 Worker。凭据只由 Worker 读取，不应写入任务输入或仓库：
+启动 API，再启动默认的自托管 FunASR/SenseVoiceSmall CPU 服务和 Podcast Worker：
 
 ```sh
 npm run server
 ```
 
 ```sh
-export ELEVENLABS_API_KEY='<your-api-key>'
+npm run asr:config
+npm run asr:up
+npm run podcast-worker
+```
+
+FunASR 首次启动会下载模型权重。官方服务无内置鉴权，Compose 默认只发布到 `127.0.0.1:8000`；不要直接对公网开放。可用下列命令查看状态：
+
+```sh
+docker compose -f deploy/funasr/compose.yaml logs -f funasr
+curl --fail http://127.0.0.1:8000/health
+```
+
+如果 ASR 服务与 Worker 不在同一台机器，需经受控内网网关暴露服务，再配置：
+
+```sh
+export FUNASR_BASE_URL='https://asr.internal.example'
 npm run podcast-worker
 ```
 
@@ -114,7 +129,7 @@ npm run yuxu -- task run podcast-tools/audio/transcribe \
   --wait --timeout 21600
 ```
 
-成功后用 `task result TASK_ID` 读取 `artifact_id`，再用 `artifact download ARTIFACT_ID --out transcript.md` 下载文字稿。当前仅支持公开小宇宙单集，默认调用 ElevenLabs Scribe v2，使用固定最大时长切片；`speaker_diarization=true` 会以稳定错误明确拒绝。生产默认 Provider 仍需中文样本评测后确定。完整契约、限制与恢复语义见 [播客转写 Task 需求](./docs/podcast-transcription-task.md)。
+成功后用 `task result TASK_ID` 读取 `artifact_id`，再用 `artifact download ARTIFACT_ID --out transcript.md` 下载文字稿。当前仅支持公开小宇宙单集，默认使用自托管 FunASR 1.4.19 + SenseVoiceSmall CPU 服务，使用固定最大时长切片；`speaker_diarization=true` 会以稳定错误明确拒绝。标准 Linux Server 上的中文准确率、实时倍率和资源占用仍需真实音频验收。完整契约与恢复语义见 [播客转写 Task 需求](./docs/podcast-transcription-task.md)，部署、安全和模型许可见 [自托管 FunASR 服务](./docs/self-hosted-asr.md)。
 
 ## 验证与配置
 
@@ -124,7 +139,7 @@ npm ci
 npm run typecheck
 ```
 
-测试使用进程内 HTTP 请求，不需要开放本机端口。API 只绑定本机回环地址。通用配置包括 `PLATFORM_DATA_DIR`、`YUXU_CLI_DIR`（旧名 `PLATFORM_CLI_DIR`）、`PORT`、`PLATFORM_LEASE_MS`、`PLATFORM_SWEEP_MS`、`WORKER_HEARTBEAT_MS` 和 `WORKER_POLL_MS`。播客 Worker 另支持 `PODCAST_WORKER_TOKEN`、`PODCAST_WORK_DIR`、`PODCAST_MAX_PAGE_BYTES`、`PODCAST_MAX_AUDIO_BYTES`、`PODCAST_MAX_DURATION_SECONDS`、`PODCAST_PAGE_TIMEOUT_MS`、`PODCAST_DOWNLOAD_TIMEOUT_MS`、`PODCAST_SEGMENT_SECONDS`、`ELEVENLABS_API_KEY` 和 `TRANSCRIPTION_MODEL`。缩短租约做恢复演示时，心跳间隔应明显短于租约。
+测试使用进程内 HTTP 请求，不需要开放本机端口。API 只绑定本机回环地址。通用配置包括 `PLATFORM_DATA_DIR`、`YUXU_CLI_DIR`（旧名 `PLATFORM_CLI_DIR`）、`PORT`、`PLATFORM_LEASE_MS`、`PLATFORM_SWEEP_MS`、`WORKER_HEARTBEAT_MS` 和 `WORKER_POLL_MS`。播客 Worker 另支持 `PODCAST_WORKER_TOKEN`、`PODCAST_WORK_DIR`、`PODCAST_MAX_PAGE_BYTES`、`PODCAST_MAX_AUDIO_BYTES`、`PODCAST_MAX_DURATION_SECONDS`、`PODCAST_PAGE_TIMEOUT_MS`、`PODCAST_DOWNLOAD_TIMEOUT_MS`、`PODCAST_SEGMENT_SECONDS`、`TRANSCRIPTION_PROVIDER`、`FUNASR_BASE_URL`、`TRANSCRIPTION_MODEL`、`FUNASR_DEPLOYMENT_ID`、`TRANSCRIPTION_REQUEST_TIMEOUT_MS` 和可选网关令牌 `FUNASR_API_TOKEN`。缩短租约做恢复演示时，心跳间隔应明显短于租约。
 
 本地 MVP 自带 `example-app/report/build` 文本任务，也可注册其他应用的任务声明。任务输入和输出使用受控 JSON Schema 子集校验，Worker 通信与检查点已抽成通用 SDK。SQLite、本地文件和 `scrypt` 仍分别需要迁移到 PostgreSQL、对象存储和成熟认证库；详见 [实现路径](./docs/implementation-plan.md)。
 

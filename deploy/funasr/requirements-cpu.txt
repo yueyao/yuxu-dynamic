@@ -1,0 +1,7 @@
+# 顶层依赖固定版本；构建后还应保存完整 pip freeze 和镜像 digest。
+torch==2.11.0
+torchaudio==2.11.0
+funasr==1.4.19
+fastapi==0.162.0
+uvicorn==0.54.0
+python-multipart==0.0.33

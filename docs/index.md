@@ -1,6 +1,6 @@
 # 共享应用平台总体方案
 
-详细的技术选择、接口、数据模型与阶段验收见 [详细设计](./detailed-design.md)；CLI 产品边界和开发路径见 [个人 CLI 设计](./personal-cli-design.md)；客户端、平台与服务端 Worker 的职责边界见 [服务端任务设计](./server-task-design.md)，播客场景的长期需求见 [播客转写 Task 需求](./podcast-transcription-task.md)，来源解析、转写引擎比较和首版选型见 [播客转写技术调研](./podcast-transcription-research.md)；实际落地顺序见 [实现路径](./implementation-plan.md)；已实现代码的职责和调用关系见 [模块说明](./modules.md)。当前通用任务接口见 [任务底座调用与状态契约](./task-platform-flow.md)，时间查询验证用例见 [时间查询闭环](./time-query-flow.md)。
+详细的技术选择、接口、数据模型与阶段验收见 [详细设计](./detailed-design.md)；CLI 产品边界和开发路径见 [个人 CLI 设计](./personal-cli-design.md)；客户端、平台与服务端 Worker 的职责边界见 [服务端任务设计](./server-task-design.md)，播客场景的长期需求见 [播客转写 Task 需求](./podcast-transcription-task.md)，来源解析、转写引擎比较和首版选型见 [播客转写技术调研](./podcast-transcription-research.md)，开源模型服务运行方式见 [自托管 FunASR 服务](./self-hosted-asr.md)；实际落地顺序见 [实现路径](./implementation-plan.md)；已实现代码的职责和调用关系见 [模块说明](./modules.md)。当前通用任务接口见 [任务底座调用与状态契约](./task-platform-flow.md)，时间查询验证用例见 [时间查询闭环](./time-query-flow.md)。
 
 ## 1. 总体结构
 
@@ -22,6 +22,7 @@ CLI / 独立 Web 应用 / 管理台
 - 领域任务由服务端应用 Worker 实现；转码、模型调用和业务计算不放入 CLI、浏览器或平台 API。
 - 客户端提交小体积 JSON，其中可以包含网页 URL、供应商内容 ID 或平台资产 ID；不上传脚本，也不把音频、图片等大文件塞进 JSON。
 - Worker 与应用版本绑定并独立部署；服务端更换处理引擎通常不要求升级 CLI。
+- 当领域模型使用 Python/GPU 等独立运行时时，可将它部署为 Worker 专属的内网推理服务；它仍属于应用执行面，不并入共享平台 API。
 
 这一边界适用于播客转写、图片生成、报告构建和数据导入等任务。平台不为每种业务增加专用执行路由，而是让应用 Worker 通过统一任务协议接入。
 

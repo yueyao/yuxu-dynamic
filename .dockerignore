@@ -1,0 +1,5 @@
+**
+!deploy/
+!deploy/funasr/
+!deploy/funasr/Dockerfile
+!deploy/funasr/requirements-cpu.txt

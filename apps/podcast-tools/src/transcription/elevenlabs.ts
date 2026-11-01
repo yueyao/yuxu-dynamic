@@ -1,6 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import type { TranscriptSegment, TranscriptWord, TranscriptionProvider } from './provider.ts';
+import {
+  TranscriptionProviderError,
+  type TranscriptSegment,
+  type TranscriptWord,
+  type TranscriptionProvider,
+} from './provider.ts';
 
 export type ElevenLabsProviderOptions = {
   apiKey: string;
@@ -89,12 +94,9 @@ export function createElevenLabsProvider(options: ElevenLabsProviderOptions): Tr
   };
 }
 
-export class ElevenLabsError extends Error {
-  readonly status: number;
-
+export class ElevenLabsError extends TranscriptionProviderError {
   constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
+    super('elevenlabs', status, message);
   }
 }
 

@@ -51,6 +51,8 @@ CLI 和 Web 应用是客户端层，只提交任务名、小体积结构化参�
 
 应用 Worker 是服务端执行面，随应用版本部署实际处理器和依赖。Worker 根据任务契约解析资源定位信息，获取实际内容，调用本地程序、模型或第三方服务，上报进度与检查点，上传产物并提交结果。外部服务密钥只存在于 Worker 部署环境。完整约束见 [服务端任务设计](./server-task-design.md)，播客场景见 [播客转写 Task 需求](./podcast-transcription-task.md)。
 
+需要 Python/PyTorch、GPU 或大体积模型权重的领域能力可拆为 Worker 专属的内网推理服务。例如 Podcast Worker 使用 HTTP multipart 调用自托管 FunASR：任务租约、片段检查点和产物仍由 Node.js Worker 编排，Python 服务只处理单个受控音频片段。推理服务不接受终端用户直接请求，不获取平台 Worker Token，也不读写平台数据库。具体部署见 [自托管 FunASR 服务](./self-hosted-asr.md)。
+
 ## 2. 仓库与模块
 
 建议在开始编码时建立以下结构；这是目标结构，不表示目前已经存在：

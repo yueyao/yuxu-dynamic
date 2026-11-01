@@ -10,8 +10,12 @@ import { parseManifest } from '../../../packages/core/src/manifest.ts';
 import { normalizeAudio, segmentAudio, type AudioMetadata, type AudioSegment } from './media/audio.ts';
 import { SafeHttpClient, type DownloadResult } from './media/safe-http.ts';
 import { renderTranscriptMarkdown, renderTranscriptText } from './transcript/markdown.ts';
-import { createElevenLabsProvider, ElevenLabsError } from './transcription/elevenlabs.ts';
-import type { TranscriptSegment, TranscriptionProvider } from './transcription/provider.ts';
+import { createConfiguredTranscriptionProvider } from './transcription/configured.ts';
+import {
+  TranscriptionProviderError,
+  type TranscriptSegment,
+  type TranscriptionProvider,
+} from './transcription/provider.ts';
 import { resolveXiaoyuzhouEpisodeFromHtml } from './sources/xiaoyuzhou.ts';
 import type { PodcastTaskInput, ResolvedEpisode } from './types.ts';
 
@@ -106,10 +110,7 @@ export async function executePodcastLease(options: PodcastWorkerOptions, lease: 
   const workDir = join(resolve(options.workspaceRoot ?? '.local/podcast-work'), lease.task_id, lease.attempt_id);
   await mkdir(workDir, { recursive: true, mode: 0o700 });
   const http = options.httpClient ?? new SafeHttpClient();
-  const provider = options.provider ?? createElevenLabsProvider({
-    apiKey: process.env.ELEVENLABS_API_KEY ?? '',
-    model: process.env.TRANSCRIPTION_MODEL,
-  });
+  const provider = options.provider ?? createConfiguredTranscriptionProvider();
   try {
     await new WorkerClient(options).withHeartbeat(lease, async (client, signal) => {
       const source = await resolveSource(client, lease, input.source_url, options.resolveEpisode ??
@@ -284,7 +285,7 @@ function errorMessage(error: unknown): string { return error instanceof Error ? 
 
 function isTransientPodcastError(error: unknown): boolean {
   return isTransientWorkerError(error) ||
-    (error instanceof ElevenLabsError && (error.status === 429 || error.status >= 500));
+    (error instanceof TranscriptionProviderError && error.transient);
 }
 
 function positiveConfiguration(name: string, fallback: number): number {

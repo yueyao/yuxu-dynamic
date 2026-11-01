@@ -7,15 +7,15 @@
 | Task | `audio/transcribe` |
 | 完整任务名 | `podcast-tools/audio/transcribe` |
 | 当前目标版本 | `transcribe-v1` |
-| 最后更新 | 2026-10-31 |
+| 最后更新 | 2026-11-01 |
 
 本文长期维护播客转写任务的产品范围、任务契约、服务端执行流程、安全边界、恢复语义和验收标准。架构总原则见 [服务端任务设计](./server-task-design.md)，来源解析、转写引擎比较和首版技术选型见 [播客转写技术调研](./podcast-transcription-research.md)：CLI 或 Web 应用只提交基本数据和播客页面链接，页面解析、音频定位、下载、转码和转写都由服务端 `podcast-tools` Worker 完成。
 
 ### 当前实现快照
 
-`transcribe-v1` 已实现可运行的服务端基线：任务 manifest、小宇宙 `__NEXT_DATA__` 解析、SSRF 防护的流式下载、SHA-256、`ffprobe`/`ffmpeg`、16 kHz 单声道 FLAC、分片检查点、ElevenLabs Scribe v2 Provider 适配器、Markdown/TXT 单产物和结构化输出。恢复时会重新解析页面、下载并重建当前 attempt 的媒体文件，校验已确认音频摘要和切片计划，并跳过已确认的转写片段。检查点不保存带签名媒体 URL 或 attempt 本地路径。
+`transcribe-v1` 已实现可运行的服务端基线：任务 manifest、小宇宙 `__NEXT_DATA__` 解析、SSRF 防护的流式下载、SHA-256、`ffprobe`/`ffmpeg`、16 kHz 单声道 FLAC、分片检查点、默认自托管 FunASR/SenseVoiceSmall Provider、显式可选的 ElevenLabs Scribe v2 Provider、Markdown/TXT 单产物和结构化输出。恢复时会重新解析页面、下载并重建当前 attempt 的媒体文件，校验已确认音频摘要和切片计划，并跳过已确认的转写片段。检查点不保存带签名媒体 URL 或 attempt 本地路径。
 
-当前已知边界：仅支持公开小宇宙单集；切片为可配置的固定最大时长，尚未实现 VAD/静音边界和重叠片段；`speaker_diarization=true` 明确失败；`quality` 尚未映射到不同 Provider/模型；ElevenLabs 仅完成 mock 边界契约验证，真实计费 API、中文准确率、数据区域和保留策略仍需部署者验证。
+当前已知边界：仅支持公开小宇宙单集；切片为可配置的固定最大时长，尚未实现 VAD/静音边界和重叠片段；`speaker_diarization=true` 明确失败；`quality` 尚未映射到不同 Provider/模型。FunASR HTTP 契约和恢复已完成 mock 自动化验证，CPU Compose 配置已校验；由于本机 Docker daemon 未运行，镜像构建、SenseVoiceSmall 真实推理、中文准确率、实时倍率和资源占用仍需在标准 Linux Server 验收。
 
 ## 1. 背景与目标
 
@@ -353,10 +353,15 @@ Markdown 产物建议格式：
 | `PODCAST_PAGE_TIMEOUT_MS` | 页面请求超时，默认 30000 毫秒 |
 | `PODCAST_DOWNLOAD_TIMEOUT_MS` | 媒体请求超时，默认 1800000 毫秒 |
 | `PODCAST_SEGMENT_SECONDS` | 切片最大时长，默认 300 秒 |
-| `ELEVENLABS_API_KEY` | ElevenLabs API 凭据，必填且不进入任务输入 |
-| `TRANSCRIPTION_MODEL` | ElevenLabs 模型，默认 `scribe_v2` |
+| `TRANSCRIPTION_PROVIDER` | Provider 选择，默认 `funasr`；可显式设为 `elevenlabs` |
+| `FUNASR_BASE_URL` | FunASR 内网地址，默认 `http://127.0.0.1:8000` |
+| `TRANSCRIPTION_MODEL` | Provider 请求模型；FunASR 默认 `sensevoice`，ElevenLabs 默认 `scribe_v2` |
+| `FUNASR_DEPLOYMENT_ID` | 参与检查点模型身份的部署 ID，默认 `funasr-1.4.19-cpu` |
+| `TRANSCRIPTION_REQUEST_TIMEOUT_MS` | 单片转写请求超时，默认 1800000 毫秒 |
+| `FUNASR_API_TOKEN` | 可选的受控内网网关 Bearer Token；官方服务自身不提供鉴权 |
+| `ELEVENLABS_API_KEY` | 仅选择 ElevenLabs Provider 时必填，不进入任务输入 |
 
-当前来源 Adapter 和 Provider 均由 `transcribe-v1` 固定，未暴露可运行时切换的配置。敏感值不得写入仓库。
+当前来源 Adapter 由 `transcribe-v1` 固定。Provider 只允许由 Worker 部署配置选择，客户端输入不能切换服务或注入地址；敏感值不得写入仓库。自托管部署、安全边界和模型许可见 [自托管 FunASR 服务](./self-hosted-asr.md)。
 
 ## 13. 可观测性
 
@@ -416,7 +421,6 @@ Markdown 产物建议格式：
 
 ## 16. 待决策项
 
-- 首版使用本地模型还是第三方转写服务。
 - 小宇宙来源适配器使用公开页面解析还是稳定的公开数据接口。
 - 服务端下载的原始音频是否缓存到对象存储，以及保留期限。
 - 首版允许的最大音频时长和文件大小。
@@ -432,9 +436,11 @@ Markdown 产物建议格式：
 | 2026-10-30 | 首版输入为公开播客单集网页 URL，不要求客户端上传音频 | 客户端只提供任务基本数据；页面解析和资源获取属于服务端任务逻辑 |
 | 2026-10-30 | 共享平台不实现通用播客抓取，来源适配器属于 `podcast-tools` Worker | 保持平台语言无关和领域无关，允许 Worker 独立发布 |
 | 2026-10-30 | 首版只返回一份文字稿产物 | 匹配当前单产物能力，先验证完整任务闭环 |
-| 2026-10-30 | 小宇宙解析优先使用公开页面 `__NEXT_DATA__`，回退到 `og:audio` 和通用 RSS enclosure | 已验证公开样本包含可用音频信息；多级回退降低单一页面字段变化的影响 |
+| 2026-10-30 | 小宇宙解析优先使用公开页面 `__NEXT_DATA__`，回退到 `og:audio`；通用 RSS enclosure 留给 V1.1 | 已验证公开样本包含可用音频信息；当前先收紧来源范围，避免形成任意 URL 抓取器 |
 | 2026-10-30 | 转写引擎使用能力可声明的 Provider 接口，首个云端接入候选为 ElevenLabs Scribe v2 | 先快速验证端到端链路，同时保留 Deepgram、FunASR 和 faster-whisper 的替换与评测空间 |
 | 2026-10-31 | `transcribe-v1` 先落地固定最大时长的逐片编码，默认 300 秒、无重叠 | 先验证恢复和产物闭环；VAD、重叠及边界模糊去重需中文样本评测后定参 |
 | 2026-10-31 | V1 显式拒绝 `speaker_diarization=true` | 分片内 speaker 标签不能冒充全局一致说话人 |
 | 2026-10-30 | V1 默认关闭说话人分离 | 分片内匿名说话人标签不能直接跨片段合并，需要全局 diarization 方案 |
+| 2026-11-01 | 默认 Provider 改为自托管 FunASR 1.4.19 + SenseVoiceSmall，ElevenLabs 只作为显式兼容选项 | 默认避免依赖外部付费 ASR，并保持 Provider 可替换边界 |
+| 2026-11-01 | 首个部署基线为标准 Linux Server 上的 CPU 容器，GPU 作为后续增强 | 先保证通用服务器可运行；性能规格须由真实播客评测决定 |
 

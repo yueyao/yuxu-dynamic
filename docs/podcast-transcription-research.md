@@ -6,7 +6,7 @@
 | 适用任务 | `podcast-tools/audio/transcribe` |
 | 关联需求 | [播客转写 Task 需求](./podcast-transcription-task.md) |
 | 架构边界 | [服务端任务设计](./server-task-design.md) |
-| 最后更新 | 2026-10-31 |
+| 最后更新 | 2026-11-01 |
 
 本文记录公开播客链接解析、音频获取、预处理、语音转写、时间戳和说话人分离方案的调研结果，并给出适合玉虚任务平台的首版实现建议。本文维护技术事实、候选方案和选型理由；产品输入输出、错误语义与验收标准以播客转写 Task 需求为准。
 
@@ -18,7 +18,7 @@
 公开播客单集 URL
   → SourceAdapter 解析页面并定位音频
   → 受控流式下载、摘要计算和 ffprobe 探测
-  → ffmpeg 标准化及按语音边界切片
+  → ffmpeg 标准化及按固定最大时长切片
   → TranscriptionProvider 转写未完成片段
   → 持久化片段检查点
   → 合并、边界去重和格式化
@@ -27,11 +27,11 @@
 
 首版选择：
 
-- 来源解析采用“小宇宙专用适配器 + 通用 RSS/HTML 回退”的分层方式。
+- 当前来源只启用小宇宙专用适配器；通用 RSS 和其他平台作为后续独立适配器增加。
 - 小宇宙专用适配器优先解析页面 `__NEXT_DATA__` 中的单集数据，再回退到 `og:audio`。
 - 音频必须由 Worker 流式下载，不得完整读入内存；下载时计算 SHA-256，并用 `ffprobe` 判断真实格式和时长。
-- 转写引擎通过能力可声明的 `TranscriptionProvider` 接口隔离；第一个云端接入候选为 ElevenLabs Scribe v2。
-- 在中文播客样本评测完成前，不把任何云服务写死为最终生产默认；自托管方案重点评测 FunASR，faster-whisper 作为通用基线。
+- 转写引擎通过能力可声明的 `TranscriptionProvider` 接口隔离；默认接入 Worker 专属内网 FunASR 1.4.19 + SenseVoiceSmall，CPU 为首个部署基线。
+- ElevenLabs Scribe v2 保留为显式可选的兼容 Provider，不作为默认依赖。中文播客样本评测仍需对比 FunASR、faster-whisper 和可选云端方案。
 - V1 的 `speaker_diarization` 默认关闭。分片内的 `speaker_0` 不能直接视为整期播客中的同一个人，全局说话人分离需要单独设计。
 - Worker 通过平台检查点恢复，不复用 Podforge 等本地工具的进程内工作流。
 
@@ -195,17 +195,18 @@ interface ResolvedEpisode {
 
 表中“支持”只代表官方接口或项目具备相应能力，不代表在中文播客上的准确率已经达到生产要求。
 
-### 6.2 推荐顺序
+### 6.2 当前选择与评测顺序
 
-首个端到端版本优先接入 ElevenLabs Scribe v2，理由是其一个接口即可返回文本、词级时间戳、语言和可选说话人标签，并能较快验证玉虚 Task 的链接解析、长任务、检查点和产物闭环。
+当前默认接入自托管 FunASR HTTP 服务，模型别名为 `sensevoice`，对应 SenseVoiceSmall。选择它的首要原因是中文优先、开源可自托管，且音频默认不离开受控服务端环境。Worker 继续按片段上传，避免官方服务一次读取过大文件；官方服务没有内置认证，因此只允许绑定回环地址或放在受控内网网关后方。
 
-同时保留以下评测路径：
+后续评测路径：
 
-- Deepgram Nova-3：云端替代候选。
-- FunASR：中文自托管首选候选。
-- faster-whisper：自托管通用基线，用于衡量云服务收益。
+- FunASR/SenseVoiceSmall CPU：首个真实 Linux Server 验收对象，测量 CER、实时倍率、内存和磁盘。
+- FunASR GPU：CPU 基线稳定后的性能增强，不作为当前已实现能力。
+- faster-whisper：自托管通用基线，用于比较中文效果和资源占用。
+- ElevenLabs、Deepgram 等云端方案：仅作为部署者明确选择的效果/能力对照。
 
-生产默认 Provider 必须在中文播客基准测试后决定，不能由 README、厂商宣称或单条样本决定。
+默认自托管是部署与数据边界决策，不代表准确率已达到生产要求；生产质量门槛仍须由固定中文播客评测集决定。
 
 ## 7. Provider 契约
 
@@ -282,7 +283,7 @@ podcast-tools worker
 ├── task-handler
 ├── sources
 │   ├── xiaoyuzhou
-│   └── generic-rss
+│   └── generic-rss    # 后续
 ├── media
 │   ├── safe-fetch
 │   ├── downloader
@@ -290,9 +291,10 @@ podcast-tools worker
 │   └── segmenter
 ├── transcription
 │   ├── provider
-│   ├── elevenlabs
-│   ├── deepgram       # 后续
-│   └── funasr         # 后续
+│   ├── configured
+│   ├── funasr
+│   ├── elevenlabs     # 显式可选
+│   └── deepgram       # 后续
 ├── transcript
 │   ├── merge
 │   └── markdown
@@ -343,7 +345,7 @@ artifact-uploaded
 
 ## 10. 中文播客基准测试
 
-在确定生产默认 Provider 前，建立一个可重复的小型评测集：
+在确认生产质量门槛和资源规格前，建立一个可重复的小型评测集：
 
 - 至少选择三期取得合法测试权限的中文播客。
 - 每期截取约 10 分钟，覆盖单人叙述、双人访谈和多人讨论。
@@ -378,19 +380,19 @@ artifact-uploaded
 
 ### P1：首个端到端 Provider
 
-状态：已完成 Provider 契约、ElevenLabs Scribe v2 适配器、分片恢复、合并和单产物闭环的实现与 mock 验证；未进行真实计费 API 验收。`transcribe-v1` 实际使用固定最大时长、无重叠的逐片编码，VAD/静音边界和重叠去重顺延至 P2 质量评测。
+状态：已完成 Provider 契约、默认 FunASR/SenseVoiceSmall 适配器、显式可选的 ElevenLabs Scribe v2 适配器、分片恢复、合并和单产物闭环的实现与 mock 验证。已提供 FunASR 1.4.19 CPU Docker/Compose 基线并校验 Compose 配置；因本机 Docker daemon 未运行，尚未构建镜像或执行真实模型推理。`transcribe-v1` 实际使用固定最大时长、无重叠的逐片编码，VAD/静音边界和重叠去重顺延至 P2 质量评测。
 
 - 定义 Provider 能力契约和规范化结果模型。
-- 接入 ElevenLabs Scribe v2。
-- 实现标准化、VAD/静音边界切片、逐片检查点和合并去重。
+- 接入默认 FunASR/SenseVoiceSmall 和显式可选的 ElevenLabs Scribe v2。
+- 实现标准化、固定最大时长切片、逐片检查点和合并；VAD、重叠和边界去重留待质量评测。
 - 生成一份 Markdown 产物并完成 CLI 提交、观察和下载闭环。
 
 ### P2：质量和恢复验证
 
-- 建立中文播客评测集，对比 ElevenLabs、Deepgram、FunASR 和 faster-whisper。
-- 验证 Worker 被终止、租约过期和第三方超时后的恢复行为。
+- 建立中文播客评测集，对比 FunASR CPU/GPU、faster-whisper 和可选云端 Provider。
+- 已通过自动化测试验证 Provider 503、租约过期和新 attempt 跳过已确认片段；仍需在真实模型进程终止、超时和重启场景验收。
 - 验证来源页面变化、音频摘要变化、重复请求和产物大小限制。
-- 根据结果确定生产默认 Provider、质量档位映射和资源规格。
+- 根据结果确认默认 FunASR 模型/部署规格是否达标，并确定质量档位映射和资源规格。
 
 ### P3：说话人和更多来源
 
@@ -402,23 +404,24 @@ artifact-uploaded
 
 | 风险 | 应对 |
 | --- | --- |
-| 小宇宙页面结构变化 | 专用 Adapter、fixture、明确解析错误、通用 RSS/HTML 回退和独立 Worker 发版 |
+| 小宇宙页面结构变化 | 专用 Adapter、fixture、明确解析错误和独立 Worker 发版；验证后再增加受控 RSS Adapter |
 | CDN 地址失效或内容变化 | 恢复时重新解析，下载后比较 SHA-256、时长和来源快照 |
 | SSRF 或危险重定向 | host allowlist、逐跳 DNS/IP 校验、限制 scheme 和重定向次数 |
 | 长音频耗尽内存或磁盘 | 流式下载、大小/时长限制、受控工作目录和完成后清理 |
 | 固定切片破坏语义 | VAD/静音边界、短重叠、基于时间和文本的边界去重 |
-| 第三方限流或重复计费 | 有界并发、退避、稳定请求键、请求 ID 检查点和错误分类 |
+| 推理服务过载、超时或中断 | 分片请求、通用瞬态错误分类、租约恢复、部署级并发和资源限制 |
 | 中文准确率不可接受 | 建立 CER 基准，对比 FunASR、faster-whisper 和多家云服务 |
 | 分片说话人标签错配 | V1 关闭；后续使用全局 diarization 或跨片段聚类 |
-| 第三方数据隐私问题 | 明确区域和保留策略，允许切换自托管 Provider，不记录敏感 URL |
+| 可选云端 Provider 的数据隐私问题 | 默认自托管；启用云端方案时明确区域和保留策略，不记录敏感 URL |
 | 模型或 API 行为漂移 | 固定 Provider/模型版本并记录到检查点和任务 release digest |
 
 ## 13. 待实现验证项
 
 - 小宇宙不同年份、不同音频格式和分享跳转链接的 fixture 覆盖范围。
 - CDN 下载是否在部分节目中要求 Referer、User-Agent 或临时签名。
-- ElevenLabs 单次提交和内部切片行为是否满足玉虚的片段级恢复与成本控制要求。
-- Provider 是否提供真正幂等请求、异步结果查询和取消能力。
+- 在标准 Linux Server 构建 FunASR CPU 镜像、下载固定 SenseVoiceSmall 快照，并完成真实音频推理、健康检查和进程恢复验收。
+- FunASR CPU 的 CER、实时倍率、峰值内存、模型缓存大小和并发上限；GPU 增强所需规格。
+- 自托管 Provider 是否需要在受控网关层增加请求幂等、排队、限流和取消能力。
 - VAD 切片参数及重叠去重算法对中文标点和专有名词的影响。
 - 当前 5 MiB 单文本产物是否足以覆盖允许的最大播客时长。
 - 音频临时资源在 Worker 重启或换实例后的保存位置与清理策略。
@@ -435,6 +438,8 @@ artifact-uploaded
 - [WhisperX](https://github.com/m-bain/whisperX)
 - [pyannote.audio](https://github.com/pyannote/pyannote-audio)
 - [FunASR](https://github.com/modelscope/FunASR)
+- [FunASR Model License](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)
+- [SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
 - [SenseVoice](https://github.com/QwenAudio/SenseVoice)
 - [ElevenLabs Speech to Text](https://elevenlabs.io/docs/capabilities/speech-to-text)
 - [Deepgram Models and Languages](https://developers.deepgram.com/docs/models-languages-overview)

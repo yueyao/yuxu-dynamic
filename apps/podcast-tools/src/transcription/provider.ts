@@ -43,3 +43,19 @@ export interface TranscriptionProvider {
   };
   transcribe(input: TranscriptionInput): Promise<TranscriptResult>;
 }
+
+/** Provider HTTP 错误的统一分类，供 Worker 决定失败还是等待租约恢复。 */
+export class TranscriptionProviderError extends Error {
+  readonly provider: string;
+  readonly status: number;
+
+  constructor(provider: string, status: number, message: string) {
+    super(message);
+    this.provider = provider;
+    this.status = status;
+  }
+
+  get transient(): boolean {
+    return this.status === 408 || this.status === 429 || this.status >= 500;
+  }
+}
