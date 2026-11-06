@@ -1,6 +1,8 @@
-.local/
 node_modules/
 dist/
 .release/
-apps/cli/package-dist/
 *.tgz
+.DS_Store
+taskbase/.data/
+taskbase/.deploy/
+taskbase/docs/screenshots/
