@@ -137,6 +137,19 @@ CLI 是转写任务的**客户端**，不替代服务端 Worker：
 - 默认等待 6 小时；`--no-wait` 只提交
 - 任务会出现在 Web「采集任务」中
 
+## Mac Agent（本地转写 Worker）
+
+Mac Agent 把远端 Taskbase 和本机 Whisper Worker 配对起来，登录后可通过 LaunchAgent 后台运行：
+
+```sh
+npm run mac:pair -- --server 'http://43.156.253.152' --token '<Worker Token>'
+npm run mac:doctor
+npm run mac:install
+npm run mac:status
+```
+
+详见 [Mac Agent 文档](docs/mac-agent.md)。
+
 ## 腾讯云部署
 
 已部署到腾讯云 Lighthouse：

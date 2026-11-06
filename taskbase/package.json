@@ -16,7 +16,16 @@
     "web": "node web/main.ts",
     "worker:podcast": "node src/podcast/worker.ts",
     "seed:feeds": "node scripts/seed-feeds.ts",
-    "worker:transcription": "node src/transcription/worker.ts"
+    "worker:transcription": "node src/transcription/worker.ts",
+    "mac:pair": "node scripts/mac-agent.ts pair",
+    "mac:doctor": "node scripts/mac-agent.ts doctor",
+    "mac:install": "node scripts/mac-agent.ts install",
+    "mac:start": "node scripts/mac-agent.ts start",
+    "mac:stop": "node scripts/mac-agent.ts stop",
+    "mac:status": "node scripts/mac-agent.ts status",
+    "mac:logs": "node scripts/mac-agent.ts logs",
+    "mac:run": "node scripts/mac-agent.ts run",
+    "mac:uninstall": "node scripts/mac-agent.ts uninstall"
   },
   "dependencies": {
     "fast-xml-parser": "^5.12.0"
