@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title><![CDATA[测试 RSS 栏目]]></title>
+    <itunes:author><![CDATA[测试作者]]></itunes:author>
+    <description><![CDATA[<p>一个用于测试的 RSS 栏目</p>]]></description>
+    <itunes:image href="https://example.com/cover.jpg"/>
+    <link>https://example.com/show</link>
+    <item>
+      <title><![CDATA[第一集：开始]]></title>
+      <guid isPermaLink="false">episode-001</guid>
+      <pubDate>Tue, 05 Nov 2026 10:00:00 GMT</pubDate>
+      <itunes:duration>01:02:03</itunes:duration>
+      <enclosure url="https://example.com/001.m4a" length="123" type="audio/mp4"/>
+      <description><![CDATA[<p>Hello <b>世界</b></p>]]></description>
+      <itunes:image href="https://example.com/001.jpg"/>
+    </item>
+    <item>
+      <title>第二集：继续</title>
+      <guid>episode-002</guid>
+      <pubDate>Tue, 06 Oct 2025 10:00:00 GMT</pubDate>
+      <itunes:duration>45:10</itunes:duration>
+      <enclosure url="https://example.com/002.mp3" type="audio/mpeg"/>
+      <description>第二集简介</description>
+    </item>
+  </channel>
+</rss>

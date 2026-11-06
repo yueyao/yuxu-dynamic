@@ -1,0 +1,23 @@
+[Unit]
+Description=Taskbase Platform API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/opt/taskbase
+EnvironmentFile=/etc/taskbase/api.env
+ExecStart=/usr/local/bin/node src/main.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/taskbase
+MemoryMax=450M
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

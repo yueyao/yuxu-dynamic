@@ -1,0 +1,24 @@
+[Unit]
+Description=Taskbase Web Server
+After=network-online.target taskbase-api.service
+Wants=network-online.target
+Requires=taskbase-api.service
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/opt/taskbase
+EnvironmentFile=/etc/taskbase/web.env
+ExecStart=/usr/local/bin/node web/main.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/taskbase
+MemoryMax=350M
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

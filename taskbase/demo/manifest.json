@@ -1,0 +1,34 @@
+{
+  "app_id": "demo",
+  "display_name": "Demo 示例应用",
+  "max_concurrency": 2,
+  "tasks": [
+    {
+      "task_key": "echo",
+      "display_name": "回显任务",
+      "input_schema": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "artifact": { "type": "boolean" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["echo"],
+        "additionalProperties": false,
+        "properties": {
+          "echo": { "type": "string", "minLength": 1 },
+          "artifact_id": { "type": "string", "minLength": 1 }
+        }
+      },
+      "queue_timeout_ms": 3600000,
+      "execution_timeout_ms": 3600000,
+      "max_attempts": 3,
+      "artifact_policy": { "required": false, "max_bytes": 1048576 },
+      "schedulable": true
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "taskbase",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "个人远程任务平台底座（独立工程）",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "server": "node src/main.ts",
+    "bootstrap": "node src/bootstrap.ts",
+    "cli": "node src/cli.ts",
+    "worker:demo": "node src/worker-demo.ts",
+    "test": "node --test test/*.test.ts",
+    "web": "node web/main.ts",
+    "worker:podcast": "node src/podcast/worker.ts",
+    "seed:feeds": "node scripts/seed-feeds.ts",
+    "worker:transcription": "node src/transcription/worker.ts"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.12.0"
+  }
+}

@@ -1,0 +1,24 @@
+[Unit]
+Description=Taskbase Podcast Worker
+After=network-online.target taskbase-api.service
+Wants=network-online.target
+Requires=taskbase-api.service
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/opt/taskbase
+EnvironmentFile=/etc/taskbase/podcast-worker.env
+ExecStart=/usr/local/bin/node src/podcast/worker.ts
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/taskbase
+MemoryMax=300M
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
