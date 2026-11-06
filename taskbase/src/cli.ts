@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /** Taskbase CLI：登录、应用注册、任务提交/查看/关闭/重试、产物下载。 */
+import { spawnSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 type Session = { server: string; token: string };
 
 const DEFAULT_SERVER = 'http://127.0.0.1:3333';
 const MAX_INPUT_BYTES = 64 * 1024;
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function configRoot(): string {
   return resolve(process.env.TASKBASE_CONFIG_DIR ?? join(homedir(), '.config', 'taskbase'));
@@ -200,6 +203,7 @@ function usage(): string {
   taskbase task retry <task-id>
   taskbase task history [--app <app-id>] [--task-key <key>] [--status <status>] [--schedule <schedule-id>] [--limit <1-100>] [--cursor <cursor>]
   taskbase artifact download <artifact-id> --out <path>
+  taskbase mac <pair|doctor|install|start|stop|status|logs|run|uninstall> [...]
   taskbase transcribe <audio-url> [--title <text>] [--language <code>] [--episode-id <id>] [--show-id <id>] [--out <path>] [--no-wait] [--timeout <秒>]
 
 所有联网命令都可加 --server <URL>；未指定时依次使用 TASKBASE_URL、已登录服务器、${DEFAULT_SERVER}。`;
@@ -214,6 +218,14 @@ async function main(args = process.argv.slice(2)): Promise<void> {
   if (args[0] === 'logout') {
     await rm(sessionPath(), { force: true });
     console.log('已删除本机登录凭据');
+    return;
+  }
+
+  if (args[0] === 'mac') {
+    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'mac-agent.ts'), ...args.slice(1)], {
+      stdio: 'inherit',
+    });
+    process.exitCode = result.status ?? 1;
     return;
   }
 

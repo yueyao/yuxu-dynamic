@@ -65,7 +65,21 @@ systemctl status taskbase-api taskbase-web taskbase-podcast-worker
 ```sh
 cd taskbase
 npm install
+
+# 安装真正的全局命令（不依赖仓库路径）
+npm run install:global
+taskbase --help
 ```
+
+安装后会生成：
+
+```text
+~/.local/bin/taskbase
+~/.local/bin/taskbase-mac-agent
+~/.local/share/taskbase/runtime/
+```
+
+Mac Agent 的 LaunchAgent 也会指向这个 runtime，而不是代码仓库。
 
 浏览器访问：
 
@@ -81,7 +95,7 @@ Mac 上：
 
 ```sh
 cd /Users/dynamic/Documents/GitHub/yuxu-dynamic/taskbase
-npm run mac:status
+taskbase mac status
 ```
 
 看到 `state = running` 即正常。
@@ -89,20 +103,20 @@ npm run mac:status
 如果未运行：
 
 ```sh
-npm run mac:start
+taskbase mac start
 ```
 
 如果还没安装：
 
 ```sh
-npm run mac:doctor
-npm run mac:install
+taskbase mac doctor
+taskbase mac install
 ```
 
 日志：
 
 ```sh
-npm run mac:logs
+taskbase mac logs
 ```
 
 ### 3.3 提交一次转写
@@ -121,9 +135,9 @@ CLI：
 cd taskbase
 export TASKBASE_URL='http://43.156.253.152'
 export TASKBASE_PASSWORD="$(cat .deploy/tencent-owner-password)"
-npm run cli -- login
+taskbase login
 
-npm run cli -- transcribe 'https://example.com/audio.mp3' \
+taskbase transcribe 'https://example.com/audio.mp3' \
   --title '单集标题' \
   --language zh \
   --out ./transcript.md
@@ -196,7 +210,7 @@ npm run cli -- transcribe 'https://example.com/audio.mp3' \
 
 ```sh
 cd taskbase
-npm run cli -- help
+taskbase help
 ```
 
 ### 登录
@@ -204,7 +218,7 @@ npm run cli -- help
 ```sh
 export TASKBASE_URL='http://43.156.253.152'
 export TASKBASE_PASSWORD="$(cat .deploy/tencent-owner-password)"
-npm run cli -- login
+taskbase login
 ```
 
 Session 默认保存在 `~/.config/taskbase/session.json`，权限 600。
@@ -212,20 +226,20 @@ Session 默认保存在 `~/.config/taskbase/session.json`，权限 600。
 ### 应用与任务
 
 ```sh
-npm run cli -- apps list
-npm run cli -- task history --limit 20
-npm run cli -- task get <task-id>
-npm run cli -- task events <task-id>
-npm run cli -- task logs <task-id>
-npm run cli -- task result <task-id>
-npm run cli -- task close <task-id> --reason 'wrong input'
-npm run cli -- task retry <task-id>
+taskbase apps list
+taskbase task history --limit 20
+taskbase task get <task-id>
+taskbase task events <task-id>
+taskbase task logs <task-id>
+taskbase task result <task-id>
+taskbase task close <task-id> --reason 'wrong input'
+taskbase task retry <task-id>
 ```
 
 ### 转写
 
 ```sh
-npm run cli -- transcribe '<audio-url>' \
+taskbase transcribe '<audio-url>' \
   --title '标题' \
   --language zh \
   --out ./transcript.md
@@ -253,7 +267,7 @@ npm run cli -- transcribe '<audio-url>' \
 ### 产物
 
 ```sh
-npm run cli -- artifact download <artifact-id> --out ./transcript.md
+taskbase artifact download <artifact-id> --out ./transcript.md
 ```
 
 ## 6. Mac Agent
@@ -281,7 +295,7 @@ cat taskbase/.deploy/transcription-worker-token
 重新配对：
 
 ```sh
-npm run mac:pair -- \
+taskbase mac pair \
   --server 'http://43.156.253.152' \
   --token '<Transcription Worker Token>' \
   --provider whisper \
@@ -291,7 +305,7 @@ npm run mac:pair -- \
 ### 检查
 
 ```sh
-npm run mac:doctor
+taskbase mac doctor
 ```
 
 会检查：
@@ -305,23 +319,23 @@ npm run mac:doctor
 ### 安装、启停、日志
 
 ```sh
-npm run mac:install
-npm run mac:start
-npm run mac:stop
-npm run mac:status
-npm run mac:logs
+taskbase mac install
+taskbase mac start
+taskbase mac stop
+taskbase mac status
+taskbase mac logs
 ```
 
 卸载（保留配置）：
 
 ```sh
-npm run mac:uninstall
+taskbase mac uninstall
 ```
 
 卸载并清除配置：
 
 ```sh
-npm run mac:uninstall -- --purge
+taskbase mac uninstall -- --purge
 ```
 
 ### Provider
@@ -353,8 +367,8 @@ TRANSCRIPTION_MODEL=scribe_v2
 修改后重启：
 
 ```sh
-npm run mac:stop
-npm run mac:start
+taskbase mac stop
+taskbase mac start
 ```
 
 ## 7. 转写内部流程
@@ -457,8 +471,8 @@ curl -H 'Host: 43.156.253.152' http://127.0.0.1/api/health
 
 ### 任务一直 queued
 
-- 检查 Mac Agent：`npm run mac:status`
-- 检查日志：`npm run mac:logs`
+- 检查 Mac Agent：`taskbase mac status`
+- 检查日志：`taskbase mac logs`
 - 检查 Worker Token 是否属于 `transcription-tools`
 
 ### 转写 401/403
@@ -466,9 +480,9 @@ curl -H 'Host: 43.156.253.152' http://127.0.0.1/api/health
 重新轮换 Token 并重新配对：
 
 ```sh
-npm run mac:uninstall
-npm run mac:pair -- --server ... --token ...
-npm run mac:install
+taskbase mac uninstall
+taskbase mac pair --server ... --token ...
+taskbase mac install
 ```
 
 ### whisper 找不到

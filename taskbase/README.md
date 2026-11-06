@@ -82,6 +82,10 @@
 cd taskbase
 npm install
 
+# 安装全局 taskbase / taskbase-mac-agent（脱离仓库路径）
+npm run install:global
+taskbase --help
+
 # 1. 初始化所有者
 export TASKBASE_OWNER_PASSWORD='change-me-to-a-long-password'
 npm run bootstrap
@@ -114,9 +118,9 @@ CLI 仍可用：
 ```sh
 export TASKBASE_URL='http://127.0.0.1:3333'
 export TASKBASE_PASSWORD='change-me-to-a-long-password'
-npm run cli -- login
-npm run cli -- apps list
-npm run cli -- task history --limit 20
+taskbase login
+taskbase apps list
+taskbase task history --limit 20
 ```
 
 ## Web 页面与截图
@@ -146,10 +150,10 @@ CLI 是转写任务的**客户端**，不替代服务端 Worker：
 Mac Agent 把远端 Taskbase 和本机 Whisper Worker 配对起来，登录后可通过 LaunchAgent 后台运行：
 
 ```sh
-npm run mac:pair -- --server 'http://43.156.253.152' --token '<Worker Token>'
-npm run mac:doctor
-npm run mac:install
-npm run mac:status
+taskbase mac pair --server 'http://43.156.253.152' --token '<Worker Token>'
+taskbase mac doctor
+taskbase mac install
+taskbase mac status
 ```
 
 详见 [Mac Agent 文档](docs/mac-agent.md)。
@@ -203,21 +207,21 @@ npm run worker:demo       # Demo Worker
 npm run worker:podcast    # 播客 Worker
 npm run worker:transcription  # 本地转写 Worker
 
-npm run cli -- login
-npm run cli -- apps list
-npm run cli -- app register demo/manifest.json
-npm run cli -- task history --limit 20
-npm run cli -- task get <task_id>
-npm run cli -- task logs <task_id> --after 0
-npm run cli -- task close <task_id> --reason 'wrong input'
-npm run cli -- task retry <task_id>
-npm run cli -- schedule list
+taskbase login
+taskbase apps list
+taskbase app register demo/manifest.json
+taskbase task history --limit 20
+taskbase task get <task_id>
+taskbase task logs <task_id> --after 0
+taskbase task close <task_id> --reason 'wrong input'
+taskbase task retry <task_id>
+taskbase schedule list
 
 # 转写：提交给 transcription-tools Worker，等待并下载 Markdown
-npm run cli -- transcribe 'https://example.com/audio.mp3' \
+taskbase transcribe 'https://example.com/audio.mp3' \
   --title '单集标题' --language zh --out ./transcript.md
 # 只提交不等待
-npm run cli -- transcribe 'https://example.com/audio.mp3' --no-wait
+taskbase transcribe 'https://example.com/audio.mp3' --no-wait
 ```
 
 ## 配置

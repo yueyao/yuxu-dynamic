@@ -1,6 +1,6 @@
 {
   "name": "taskbase",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "个人远程任务平台底座（独立工程）",
@@ -25,9 +25,21 @@
     "mac:status": "node scripts/mac-agent.ts status",
     "mac:logs": "node scripts/mac-agent.ts logs",
     "mac:run": "node scripts/mac-agent.ts run",
-    "mac:uninstall": "node scripts/mac-agent.ts uninstall"
+    "mac:uninstall": "node scripts/mac-agent.ts uninstall",
+    "install:global": "node scripts/install-global.ts"
   },
   "dependencies": {
     "fast-xml-parser": "^5.12.0"
-  }
+  },
+  "files": [
+    "src/",
+    "scripts/",
+    "web/",
+    "demo/",
+    "deploy/",
+    "docs/",
+    "package.json",
+    "package-lock.json",
+    "README.md"
+  ]
 }

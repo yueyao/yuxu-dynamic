@@ -10,6 +10,16 @@ Mac Agent（LaunchAgent）
        └─ ffmpeg + whisper CLI
 ```
 
+## 0. 安装全局命令
+
+```sh
+cd taskbase
+npm run install:global
+taskbase --help
+```
+
+运行时会复制到 `~/.local/share/taskbase/runtime`，不依赖仓库路径。代码更新后重新执行 `npm run install:global`，再执行 `taskbase mac install`。
+
 ## 1. 准备
 
 需要：
@@ -34,7 +44,7 @@ whisper --help
 ```sh
 cd taskbase
 
-npm run mac:pair -- \
+taskbase mac pair \
   --server 'http://43.156.253.152' \
   --token '<Transcription Worker Token>' \
   --provider whisper \
@@ -80,7 +90,7 @@ TRANSCRIPTION_CHUNK_SECONDS=600
 ## 3. 检查
 
 ```sh
-npm run mac:doctor
+taskbase mac doctor
 ```
 
 会检查：
@@ -95,7 +105,7 @@ npm run mac:doctor
 ## 4. 安装为登录后台服务
 
 ```sh
-npm run mac:install
+taskbase mac install
 ```
 
 会写入：
@@ -114,11 +124,11 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.taskbase.mac-agent.plist
 之后：
 
 ```sh
-npm run mac:start
-npm run mac:stop
-npm run mac:status
-npm run mac:logs
-npm run mac:uninstall
+taskbase mac start
+taskbase mac stop
+taskbase mac status
+taskbase mac logs
+taskbase mac uninstall
 ```
 
 > `launchctl` 在 DSH 的沙箱进程里会被 macOS 拒绝；请在正常 Terminal 中执行 `mac:install`。
@@ -128,7 +138,7 @@ npm run mac:uninstall
 不安装 LaunchAgent，直接在前台跑：
 
 ```sh
-npm run mac:run
+taskbase mac run
 ```
 
 适合第一次确认 Worker 能连接远端。
@@ -146,7 +156,7 @@ npm run mac:run
 CLI 示例：
 
 ```sh
-npm run cli -- transcribe 'https://example.com/audio.mp3' \
+taskbase transcribe 'https://example.com/audio.mp3' \
   --title '测试单集' \
   --out ./transcript.md
 ```
@@ -154,9 +164,9 @@ npm run cli -- transcribe 'https://example.com/audio.mp3' \
 ## 7. 故障排查
 
 ```sh
-npm run mac:doctor
-npm run mac:status
-npm run mac:logs
+taskbase mac doctor
+taskbase mac status
+taskbase mac logs
 ```
 
 常见问题：

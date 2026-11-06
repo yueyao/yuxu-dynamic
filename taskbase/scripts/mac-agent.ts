@@ -220,12 +220,18 @@ async function install(): Promise<void> {
   await writeFile(plistPath(), plist, { mode: 0o600 });
   await chmod(plistPath(), 0o600);
   await launchctl(['bootout', serviceTarget()]);
-  const boot = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  let boot = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
+  if (!boot.ok) {
+    // launchd 有时在 bootout 后短暂拒绝 bootstrap；重试一次。
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+    boot = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
+  }
   if (!boot.ok) throw new Error(`launchctl bootstrap 失败：${boot.output}`);
   await launchctl(['kickstart', '-k', serviceTarget()]);
   console.log(`已安装 LaunchAgent：${plistPath()}`);
   console.log(`日志：${logPath()}`);
-  console.log('状态：npm run mac:status');
+  console.log('状态：taskbase mac status');
 }
 
 async function start(): Promise<void> {
@@ -288,12 +294,12 @@ async function uninstall(args: string[]): Promise<void> {
 
 function usage(): string {
   return `用法:
-  npm run mac:pair -- --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
-  npm run mac:doctor
-  npm run mac:install
-  npm run mac:start | mac:stop | mac:status | mac:logs
-  npm run mac:run
-  npm run mac:uninstall [-- --purge]
+  taskbase mac pair --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
+  taskbase mac doctor
+  taskbase mac install
+  taskbase mac start | stop | status | logs
+  taskbase mac run
+  taskbase mac uninstall [--purge]
 
 说明：
   - 本工具只控制 Mac 上的 Transcription Worker；任务仍在远端 Platform。
