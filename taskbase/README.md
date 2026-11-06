@@ -117,19 +117,7 @@ npm run cli -- task history --limit 20
 
 ## Web 页面与截图
 
-- [总览](docs/screenshots/overview.png)
-- [节目库](docs/screenshots/podcast-shows.png)
-- [任务列表](docs/screenshots/tasks.png)
-- [调度](docs/screenshots/schedules.png)
-- [RSS 入库结果](docs/screenshots/rss-ingest.png)
-- [Feed 任务列表（9 个，默认停用）](docs/screenshots/feed-tasks.png)
-- [Feed 节目库（知行小酒馆已入库）](docs/screenshots/feed-library.png)
-- [转写稿查看](docs/screenshots/transcript-view.png)
-- [腾讯云部署总览](docs/screenshots/tencent-deploy.png)
-- [应用与 Token](docs/screenshots/apps.png)
-- [登录页](docs/screenshots/login.png)
-
-截图使用临时实例和公开页样本生成，仅用于展示布局。
+截图文件较大，未纳入 Git；本地保留在 `docs/screenshots/`，用于说明 Web 页面和部署效果。
 
 ## 音频转写调研
 
@@ -269,7 +257,7 @@ demo/manifest.json Demo 应用声明
 docs/
   architecture.md  架构与流程说明
   diagrams/        PNG 架构图/流程图
-  screenshots/     Web 截图
+  screenshots/     本地 Web 截图（未纳入 Git）
 test/
   base.test.ts     底座端到端测试
   podcast.test.ts  解析、播客表、Worker 测试
