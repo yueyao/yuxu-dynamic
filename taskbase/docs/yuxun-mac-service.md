@@ -186,3 +186,10 @@ yuxun mac logs
 - Worker Token 只保存在本机
 - 远端建议使用 HTTPS
 - 不要把 `.config/taskbase/mac-agent.env` 或 `.deploy/` 提交到 Git
+
+
+## 12. 相关文档
+
+- [Yuxun CLI 使用文档](cli.md)
+- [Yuxun Web 使用文档](web.md)
+- [Taskbase 文档索引](usage.md)

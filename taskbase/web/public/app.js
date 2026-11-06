@@ -18,6 +18,7 @@
     schedules: { title: '调度', subtitle: 'cron 调度、下次触发与运行历史', render: renderSchedules },
     'podcast-shows': { title: '节目库', subtitle: '节目、单集与两年范围采集', render: renderPodcastShows },
     'podcast-tasks': { title: '采集任务', subtitle: '播客任务列表与结果', render: renderPodcastTasks },
+    transcript: { title: '转写稿', subtitle: '在 Web 中阅读转写 Markdown', render: renderTranscript },
   };
 
   const STATUS_LABELS = {
@@ -64,6 +65,10 @@
   function badge(status) {
     const normalized = status || 'unknown';
     return el('span', { class: `badge badge-${normalized}` }, STATUS_LABELS[normalized] || normalized);
+  }
+
+  function pill(value, className = '') {
+    return el('span', { class: `pill ${className}`.trim() }, value);
   }
 
   function fmtDate(value) {
@@ -373,7 +378,7 @@
       state.me = result;
       showApp();
       await loadApps(true);
-      if (!location.hash || !routes[location.hash.replace(/^#\/?/, '')]) {
+      if (!location.hash || (!routes[location.hash.replace(/^#\/?/, '')] && !transcriptEpisodeId())) {
         history.replaceState(null, '', '#/overview');
       }
       await renderCurrent();
@@ -391,7 +396,13 @@
     showLogin();
   }
 
+  function transcriptEpisodeId() {
+    const match = location.hash.match(/^#\/transcript\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
   function activeRoute() {
+    if (transcriptEpisodeId()) return 'transcript';
     const route = location.hash.replace(/^#\/?/, '');
     return routes[route] ? route : 'overview';
   }
@@ -1130,29 +1141,167 @@
     toast(`已提交转写任务 ${shortId(result.task?.task_id)}`, 'success');
   }
 
-  async function openTranscript(episode) {
-    const data = await podcast(`/episodes/${encodeURIComponent(episode.episode_id)}/transcript`);
-    const transcript = data.transcript;
-    if (!transcript) {
-      toast('还没有转写稿，先点击“转写”', 'error');
+  function appendInline(parent, text) {
+    const pattern = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+    let cursor = 0;
+    for (const match of text.matchAll(pattern)) {
+      const index = match.index ?? 0;
+      if (index > cursor) parent.append(document.createTextNode(text.slice(cursor, index)));
+      const token = match[0];
+      if (token.startsWith('**')) {
+        parent.append(el('strong', {}, token.slice(2, -2)));
+      } else if (token.startsWith('*')) {
+        parent.append(el('em', {}, token.slice(1, -1)));
+      } else if (token.startsWith('`')) {
+        parent.append(el('code', {}, token.slice(1, -1)));
+      } else {
+        const split = token.indexOf('](');
+        const label = token.slice(1, split);
+        const href = token.slice(split + 2, -1);
+        parent.append(el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label));
+      }
+      cursor = index + token.length;
+    }
+    if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+  }
+
+  function renderMarkdown(markdown) {
+    const root = el('div', { class: 'markdown' });
+    const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+    let paragraph = [];
+    let list = null;
+    let listType = null;
+    let code = [];
+    let inCode = false;
+
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      const node = el('p', {});
+      appendInline(node, paragraph.join(' '));
+      root.append(node);
+      paragraph = [];
+    };
+    const flushList = () => {
+      if (list) root.append(list);
+      list = null;
+      listType = null;
+    };
+    const flush = () => { flushParagraph(); flushList(); };
+    const startList = (type) => {
+      if (list && listType !== type) flushList();
+      if (!list) {
+        list = el(type === 'ol' ? 'ol' : 'ul', {});
+        listType = type;
+      }
+    };
+
+    for (const source of lines) {
+      const line = source.trimEnd();
+      if (inCode) {
+        if (line.trim().startsWith('```')) {
+          root.append(el('pre', {}, el('code', {}, code.join('\n'))));
+          code = [];
+          inCode = false;
+        } else {
+          code.push(source);
+        }
+        continue;
+      }
+      if (line.trim().startsWith('```')) {
+        flush();
+        inCode = true;
+        continue;
+      }
+      if (!line.trim()) {
+        flush();
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flush();
+        const level = Math.min(heading[1].length + 1, 6);
+        const node = el(`h${level}`, {});
+        appendInline(node, heading[2]);
+        root.append(node);
+        continue;
+      }
+      if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) {
+        flush();
+        root.append(el('hr', {}));
+        continue;
+      }
+      const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+      if (bullet) {
+        startList('ul');
+        const item = el('li', {});
+        appendInline(item, bullet[1]);
+        list.append(item);
+        continue;
+      }
+      const ordered = line.match(/^\s*\d+\.\s+(.*)$/);
+      if (ordered) {
+        startList('ol');
+        const item = el('li', {});
+        appendInline(item, ordered[1]);
+        list.append(item);
+        continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        flush();
+        const quote = el('blockquote', {});
+        appendInline(quote, line.replace(/^\s*>\s?/, ''));
+        root.append(quote);
+        continue;
+      }
+      paragraph.push(line.trim());
+    }
+    flush();
+    if (inCode) root.append(el('pre', {}, el('code', {}, code.join('\n'))));
+    return root;
+  }
+
+  async function renderTranscript() {
+    const episodeId = transcriptEpisodeId();
+    const back = actionButton('返回节目库', 'grid', () => navigate('podcast-shows'));
+    setPageActions(back);
+    if (!episodeId) {
+      clear(content);
+      content.append(emptyState('转写稿不存在', '请从节目库的单集进入。', 'mic'));
       return;
     }
-    showModal({
-      title: `转写稿 · ${episode.title}`,
-      subtitle: `${transcript.provider} / ${transcript.model} · ${transcript.language} · ${fmtDuration(transcript.duration_seconds)}`,
-      wide: true,
-      body: [
-        kv([
-          ['创建时间', fmtDateTime(transcript.created_at)],
-          ['片段数', String((transcript.segments || []).length)],
-          ['产物', transcript.artifact_id
-            ? el('a', { href: `/api/platform/artifacts/${encodeURIComponent(transcript.artifact_id)}/download`, target: '_blank', rel: 'noopener' }, '下载 Markdown')
-            : '—'],
-        ]),
-        el('div', { class: 'section-title' }, '文字稿'),
-        pre(transcript.text),
-      ],
-    });
+    const data = await podcast(`/episodes/${encodeURIComponent(episodeId)}/transcript`);
+    const transcript = data.transcript;
+    clear(content);
+    if (!transcript) {
+      content.append(emptyState('还没有转写稿', '回到节目库，打开单集后点击“转写”。', 'mic'));
+      return;
+    }
+    setPageActions(
+      back,
+      actionButton('复制原文', 'tasks', async () => {
+        try { await navigator.clipboard.writeText(transcript.text); toast('已复制转写原文', 'success'); }
+        catch { toast('复制失败，请手动选择文本', 'error'); }
+      }),
+    );
+    content.append(el('div', { class: 'transcript-page' },
+      el('div', { class: 'transcript-head' },
+        el('div', { class: 'eyebrow' }, 'TRANSCRIPT'),
+        el('h2', { class: 'transcript-title' }, transcript.title || '转写稿'),
+        el('div', { class: 'transcript-meta' },
+          pill(transcript.language || 'unknown'),
+          pill(`${transcript.provider || 'unknown'} / ${transcript.model || 'unknown'}`),
+          pill(fmtDuration(transcript.duration_seconds)),
+          pill(`${(transcript.segments || []).length} 个片段`),
+          el('span', { class: 'hint' }, fmtDateTime(transcript.created_at)))),
+      el('section', { class: 'card transcript-card' }, renderMarkdown(transcript.text))));
+  }
+
+  async function openTranscript(episode) {
+    if (!episode?.episode_id) {
+      toast('缺少单集 ID', 'error');
+      return;
+    }
+    navigate(`transcript/${encodeURIComponent(episode.episode_id)}`);
   }
 
   async function registerTranscriptionApp() {
@@ -1267,7 +1416,7 @@
       state.me = me;
       showApp();
       await loadApps(true);
-      if (!location.hash || !routes[location.hash.replace(/^#\/?/, '')]) {
+      if (!location.hash || (!routes[location.hash.replace(/^#\/?/, '')] && !transcriptEpisodeId())) {
         history.replaceState(null, '', '#/overview');
       }
       await renderCurrent();

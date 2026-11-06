@@ -2,7 +2,8 @@
 
 位于 `yuxu-dynamic` 仓库中的独立 Taskbase 工程。
 
-> CLI 命令名：`yuxun`（Yuxun CLI）。完整使用方法见 [Taskbase 使用文档](docs/usage.md)。
+> CLI 命令名：`yuxun`（Yuxun CLI）。
+> 使用说明：[Web 服务](docs/web.md) · [CLI](docs/cli.md) · [文档索引](docs/usage.md)。
 
 当前包含三层：
 
@@ -156,7 +157,7 @@ yuxun mac install
 yuxun mac status
 ```
 
-详见 [Yuxun Mac 服务 文档](docs/yuxun-mac-service.md)。
+详见 [Yuxun Mac 服务文档](docs/yuxun-mac-service.md)。
 
 ## 腾讯云部署
 
