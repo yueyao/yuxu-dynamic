@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** 转写 Worker：下载公开音频 → ffmpeg 标准化 → 本地 ASR → 保存转写稿并上传远端产物。 */
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,7 +9,7 @@ import { config } from '../config.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { TRANSCRIPTION_APP_ID } from './manifest.ts';
 import { TranscriptionStore, type TranscriptSegment } from './store.ts';
-import type { AsrProvider } from './asr.ts';
+import type { AsrProvider, AsrResult } from './asr.ts';
 import { createAsrProvider } from './providers.ts';
 import { SafeHttpClient } from './safe-http.ts';
 
@@ -19,6 +19,7 @@ export type TranscriptionWorkerOptions = {
   dataDir?: string;
   asrProvider?: AsrProvider;
   pollMs?: number;
+  chunkSeconds?: number;
 };
 
 type TaskInput = {
@@ -57,20 +58,86 @@ async function download(url: string, destination: string): Promise<void> {
   });
 }
 
-function runFfmpeg(inputPath: string, outputPath: string): Promise<void> {
+function runProcess(command: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', [
-      '-y', '-loglevel', 'error', '-i', inputPath,
-      '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', outputPath,
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let error = '';
-    child.stderr.on('data', (chunk: Buffer) => { error += chunk.toString(); });
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
     child.on('error', reject);
     child.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg 失败（${code}）：${error.slice(-1000)}`));
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`${command} 失败（${code}）：${stderr.slice(-1000)}`));
     });
   });
+}
+
+async function runFfmpeg(inputPath: string, outputPath: string): Promise<void> {
+  await runProcess('ffmpeg', [
+    '-y', '-loglevel', 'error', '-i', inputPath,
+    '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', outputPath,
+  ]);
+}
+
+async function probeDuration(path: string): Promise<number> {
+  const value = await runProcess('ffprobe', [
+    '-v', 'error', '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1', path,
+  ]);
+  const duration = Number(value.trim());
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+export type AudioChunk = { path: string; offset: number; duration: number };
+
+/** 用 ffmpeg segment 切成独立 WAV；按实际时长累加 offset，避免依赖理论 chunk 边界。 */
+export async function splitAudio(wav: string, workDir: string, chunkSeconds: number): Promise<AudioChunk[]> {
+  if (!Number.isFinite(chunkSeconds) || chunkSeconds <= 0) throw new Error('chunkSeconds 必须是正数');
+  const outputDir = join(workDir, 'chunks');
+  await mkdir(outputDir, { recursive: true, mode: 0o700 });
+  await runProcess('ffmpeg', [
+    '-y', '-loglevel', 'error', '-i', wav,
+    '-f', 'segment', '-segment_time', String(chunkSeconds),
+    '-reset_timestamps', '1', '-c', 'copy',
+    join(outputDir, 'chunk-%05d.wav'),
+  ]);
+  const files = (await readdir(outputDir))
+    .filter((name) => name.endsWith('.wav'))
+    .sort();
+  if (files.length === 0) throw new Error('ffmpeg 没有生成音频切片');
+  const chunks: AudioChunk[] = [];
+  let offset = 0;
+  for (const name of files) {
+    const path = join(outputDir, name);
+    const duration = await probeDuration(path);
+    chunks.push({ path, offset, duration });
+    offset += duration;
+  }
+  return chunks;
+}
+
+export function mergeChunks(chunks: Array<{ offset: number; result: AsrResult }>): AsrResult {
+  const segments: TranscriptSegment[] = [];
+  const texts: string[] = [];
+  let language = 'zh';
+  let durationSeconds = 0;
+  for (const { offset, result } of chunks) {
+    if (result.text.trim()) texts.push(result.text.trim());
+    language = result.language || language;
+    for (const segment of result.segments) {
+      segments.push({ start: segment.start + offset, end: segment.end + offset, text: segment.text });
+    }
+    durationSeconds += result.durationSeconds;
+  }
+  return {
+    text: texts.join('\n'),
+    segments,
+    language,
+    durationSeconds,
+    provider: chunks[0]?.result.provider ?? 'unknown',
+    model: chunks[0]?.result.model ?? 'unknown',
+  };
 }
 
 function timestamp(seconds: number): string {
@@ -123,9 +190,26 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
       const wav = join(workDir, 'audio.wav');
       await runFfmpeg(downloaded, wav);
 
-      await active.progress(lease, 30, `本地 ASR（${provider.name}/${provider.model}）`);
-      const result = await provider.transcribe(wav, task.language ?? 'zh');
-      await active.progress(lease, 80, '生成文字稿');
+      const chunkSeconds = options.chunkSeconds
+        ?? Number(process.env.TRANSCRIPTION_CHUNK_SECONDS ?? 600);
+      const chunks = await splitAudio(wav, workDir, chunkSeconds);
+      await active.progress(lease, 30, `音频 ${chunks.length} 段，开始转写`);
+      const completed: Array<{ offset: number; result: AsrResult }> = [];
+      for (const [index, chunk] of chunks.entries()) {
+        const stepKey = `asr-chunk-${index}`;
+        let chunkResult = active.stepValue<AsrResult>(lease, stepKey);
+        if (chunkResult) {
+          await active.log(lease, 'info', `复用切片检查点 ${index + 1}/${chunks.length}`);
+        } else {
+          await active.progress(lease, 30 + Math.round((index / chunks.length) * 55),
+            `转写切片 ${index + 1}/${chunks.length}`);
+          chunkResult = await provider.transcribe(chunk.path, task.language ?? 'zh');
+          await active.saveStep(lease, stepKey, chunkResult);
+        }
+        completed.push({ offset: chunk.offset, result: chunkResult });
+      }
+      const result = mergeChunks(completed);
+      await active.progress(lease, 88, '生成文字稿');
       const artifact = Buffer.from(markdown(task, provider, result), 'utf8');
       const artifactId = await active.uploadArtifact(lease, 'transcript.md', artifact, 'text/markdown; charset=utf-8');
       const transcript = store.save({

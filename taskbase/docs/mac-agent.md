@@ -71,6 +71,12 @@ ELEVENLABS_API_KEY=...
 TRANSCRIPTION_MODEL=scribe_v2
 ```
 
+长音频切片：
+
+```sh
+TRANSCRIPTION_CHUNK_SECONDS=600
+```
+
 ## 3. 检查
 
 ```sh

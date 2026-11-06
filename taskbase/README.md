@@ -63,6 +63,7 @@
 - 产物上传回远端平台 API；文字稿写入 `transcription_transcripts`
 - Web 单集列表可直接“转写”，并查看转写稿/下载 Markdown
 - 安全下载：默认只允许 HTTPS，拒绝私网/保留地址；本地测试可显式允许 HTTP
+- 长音频按 10 分钟切片，逐片检查点；Worker 恢复时复用已完成切片
 - 临时音频默认删除；单产物上限 5 MiB
 
 **尚未包含**：RSS 自动发现 UI、拉取→转写自动串联、文章→Markdown、平台 `app_state`、多产物/大二进制、多用户权限、Blog 发布领域。
@@ -236,6 +237,7 @@ npm run cli -- transcribe 'https://example.com/audio.mp3' --no-wait
 | `TRANSCRIPTION_MODEL` | Provider 默认 | FunASR/ElevenLabs 模型 |
 | `FUNASR_BASE_URL` / `FUNASR_API_TOKEN` | 本机 8000 | 自托管 FunASR |
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_BASE_URL` | — | ElevenLabs |
+| `TRANSCRIPTION_CHUNK_SECONDS` | `600` | 长音频切片长度；每片完成即写检查点 |
 | `TRANSCRIPTION_ALLOW_INSECURE_HTTP` | 未设置 | 仅本地测试允许 HTTP/私网，生产不要开启 |
 | `TRANSCRIPTION_WHISPER_BIN` | `whisper` | Whisper CLI 路径 |
 | `TRANSCRIPTION_WHISPER_MODEL` | `small` | Whisper 模型（small/medium） |
@@ -309,7 +311,7 @@ scripts/
 node --test test/*.test.ts
 ```
 
-当前 **19 个测试全部通过**，覆盖任务闭环、恢复、超时、关闭/重试、cron/调度、播客/RSS 解析/入库/Worker、转写存储/Provider/安全下载、Web 登录/代理/播客 API。
+当前 **20 个测试全部通过**，覆盖任务闭环、恢复、超时、关闭/重试、cron/调度、播客/RSS 解析/入库/Worker、转写存储/Provider/安全下载/切片、Web 登录/代理/播客 API。
 
 真实进程验证过：
 

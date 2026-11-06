@@ -34,7 +34,7 @@
 | --- | --- | --- |
 | `apps/podcast-tools` FunASR / ElevenLabs Provider | **已迁移契约** | 新增 `providers.ts`；仍需真实服务/Key 验收 |
 | 安全下载 `safe-http.ts`、DNS/IP 校验 | **已迁移** | 新增 `safe-http.ts`；默认 HTTPS/公网，测试可显式放开 |
-| 音频切片、逐片检查点、恢复 | 未迁移 | 新版本整段转写，长音频恢复较弱 |
+| 音频切片、逐片检查点、恢复 | **已迁移简化版** | 10 分钟切片、逐片 `saveStep`、重试复用；暂无重叠/VAD |
 | `apps/time-worker` / `time-cli` 时间查询 | 未迁移 | 旧验收用例 |
 | CLI npm 包、发布工作流、`scripts/build-cli` | 未迁移 | 新 CLI 是源码运行 |
 | `deploy/funasr` Docker/模型服务 | 未迁移 | 本地 ASR 部署仍用外部 Whisper |
