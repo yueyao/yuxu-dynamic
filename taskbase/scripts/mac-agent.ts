@@ -11,7 +11,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const LABEL = 'com.taskbase.mac-agent';
+const LABEL = 'com.yuxun.worker';
+const LEGACY_LABEL = 'com.taskbase.mac-agent';
 const DEFAULT_MODEL = 'small';
 
 type AgentConfig = {
@@ -32,8 +33,9 @@ function launchAgentsDir(): string {
   return resolve(process.env.TASKBASE_LAUNCH_AGENTS_DIR ?? join(homedir(), 'Library', 'LaunchAgents'));
 }
 function plistPath(): string { return join(launchAgentsDir(), `${LABEL}.plist`); }
+function legacyPlistPath(): string { return join(launchAgentsDir(), `${LEGACY_LABEL}.plist`); }
 function logPath(): string {
-  return resolve(process.env.TASKBASE_MAC_AGENT_LOG ?? join(homedir(), 'Library', 'Logs', 'taskbase-agent.log'));
+  return resolve(process.env.TASKBASE_MAC_AGENT_LOG ?? join(homedir(), 'Library', 'Logs', 'yuxun-worker.log'));
 }
 
 /** DSH/Electron 里 process.execPath 可能是 Helper；优先找真正的 node。 */
@@ -113,6 +115,9 @@ function launchctl(args: string[]): Promise<{ ok: boolean; output: string }> {
 function serviceTarget(): string {
   return `gui/${process.getuid?.() ?? 501}/${LABEL}`;
 }
+function legacyServiceTarget(): string {
+  return `gui/${process.getuid?.() ?? 501}/${LEGACY_LABEL}`;
+}
 
 function envFile(server: string, token: string, dataDir: string, model: string, provider: string): string {
   return [
@@ -160,7 +165,7 @@ async function pair(args: string[]): Promise<void> {
   console.log(`Provider：${provider}/${model}`);
   console.log(`数据目录：${dataDir}`);
   console.log(`环境文件：${envPath()}`);
-  console.log('下一步：npm run mac:doctor && npm run mac:install');
+  console.log('下一步：yuxun mac doctor && yuxun mac install');
 }
 
 async function doctor(): Promise<void> {
@@ -184,7 +189,7 @@ async function doctor(): Promise<void> {
 
 async function install(): Promise<void> {
   const config = await readConfig();
-  if (!config) throw new Error('尚未配对，请先运行 npm run mac:pair');
+  if (!config) throw new Error('尚未配对，请先运行 yuxun mac pair');
   if (!existsSync(envPath())) throw new Error(`缺少环境文件 ${envPath()}`);
   await mkdir(launchAgentsDir(), { recursive: true });
   await mkdir(dirname(logPath()), { recursive: true });
@@ -219,6 +224,9 @@ async function install(): Promise<void> {
 `;
   await writeFile(plistPath(), plist, { mode: 0o600 });
   await chmod(plistPath(), 0o600);
+  // 迁移旧名称的 后台服务，避免两个 Worker 同时运行。
+  await launchctl(['bootout', legacyServiceTarget()]);
+  await rm(legacyPlistPath(), { force: true });
   await launchctl(['bootout', serviceTarget()]);
   await new Promise((resolveWait) => setTimeout(resolveWait, 500));
   let boot = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
@@ -229,24 +237,24 @@ async function install(): Promise<void> {
   }
   if (!boot.ok) throw new Error(`launchctl bootstrap 失败：${boot.output}`);
   await launchctl(['kickstart', '-k', serviceTarget()]);
-  console.log(`已安装 LaunchAgent：${plistPath()}`);
+  console.log(`Yuxun 后台服务已安装：${plistPath()}`);
   console.log(`日志：${logPath()}`);
-  console.log('状态：taskbase mac status');
+  console.log('状态：yuxun mac status');
 }
 
 async function start(): Promise<void> {
-  if (!existsSync(plistPath())) throw new Error('尚未安装 LaunchAgent，请先运行 npm run mac:install');
+  if (!existsSync(plistPath())) throw new Error('尚未安装 Yuxun 后台服务，请先运行 yuxun mac install');
   const result = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
   if (!result.ok && !result.output.includes('already bootstrapped')) {
     throw new Error(result.output || 'launchctl bootstrap 失败');
   }
   await launchctl(['kickstart', '-k', serviceTarget()]);
-  console.log('Mac Agent 已启动');
+  console.log('Yuxun Mac 服务已启动');
 }
 
 async function stop(): Promise<void> {
   const result = await launchctl(['bootout', serviceTarget()]);
-  console.log(result.ok ? 'Mac Agent 已停止' : `停止失败：${result.output}`);
+  console.log(result.ok ? 'Yuxun Mac 服务已停止' : `停止失败：${result.output}`);
   if (!result.ok) process.exitCode = 1;
 }
 
@@ -255,9 +263,9 @@ async function status(): Promise<void> {
   console.log(`服务端：${config?.server ?? '未配对'}`);
   console.log(`Provider：${config?.provider ?? '未设置'}/${config?.model ?? '未设置'}`);
   console.log(`环境：${envPath()}`);
-  console.log(`LaunchAgent：${plistPath()}`);
+  console.log(`后台服务：${plistPath()}`);
   const result = await launchctl(['print', serviceTarget()]);
-  console.log(result.ok ? result.output : 'LaunchAgent 未安装或未运行');
+  console.log(result.ok ? result.output : '后台服务 未安装或未运行');
   if (!result.ok) process.exitCode = 1;
 }
 
@@ -273,7 +281,7 @@ async function logs(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  if (!existsSync(envPath())) throw new Error('尚未配对，请先运行 npm run mac:pair');
+  if (!existsSync(envPath())) throw new Error('尚未配对，请先运行 yuxun mac pair');
   const worker = join(ROOT, 'src', 'transcription', 'worker.ts');
   await new Promise<void>((done, reject) => {
     const child = spawn(nodeBinary(), [`--env-file=${envPath()}`, worker], { cwd: ROOT, stdio: 'inherit' });
@@ -289,17 +297,19 @@ async function uninstall(args: string[]): Promise<void> {
     await rm(envPath(), { force: true });
     await rm(configPath(), { force: true });
   }
-  console.log('已卸载 LaunchAgent');
+  await launchctl(['bootout', legacyServiceTarget()]);
+  await rm(legacyPlistPath(), { force: true });
+  console.log('已卸载 Yuxun 后台服务');
 }
 
 function usage(): string {
   return `用法:
-  taskbase mac pair --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
-  taskbase mac doctor
-  taskbase mac install
-  taskbase mac start | stop | status | logs
-  taskbase mac run
-  taskbase mac uninstall [--purge]
+  yuxun mac pair --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
+  yuxun mac doctor
+  yuxun mac install
+  yuxun mac start | stop | status | logs
+  yuxun mac run
+  yuxun mac uninstall [--purge]
 
 说明：
   - 本工具只控制 Mac 上的 Transcription Worker；任务仍在远端 Platform。

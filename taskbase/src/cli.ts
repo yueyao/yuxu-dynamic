@@ -86,7 +86,7 @@ async function request(server: string, path: string,
 
 async function authenticated(server: string): Promise<string> {
   const session = await readSession();
-  if (!session) throw new Error('尚未登录，请先运行 taskbase login');
+  if (!session) throw new Error('尚未登录，请先运行 yuxun login');
   if (session.server !== server) throw new Error('登录凭据属于另一个服务器，请重新 login');
   return session.token;
 }
@@ -174,7 +174,7 @@ async function waitTask(server: string, token: string, taskId: string, timeoutSe
       return result.data;
     }
     if (Date.now() >= deadline) {
-      throw new Error(`等待任务超时；任务仍在平台运行，可稍后执行 taskbase task result ${taskId}`);
+      throw new Error(`等待任务超时；任务仍在平台运行，可稍后执行 yuxun task result ${taskId}`);
     }
     await new Promise((done) => setTimeout(done, 500));
   }
@@ -182,29 +182,29 @@ async function waitTask(server: string, token: string, taskId: string, timeoutSe
 
 function usage(): string {
   return `用法:
-  taskbase login [--server <URL>] [--username <name>]
-  taskbase logout
-  taskbase apps list
-  taskbase app register <manifest.json>
-  taskbase app rotate-token <app-id>
-  taskbase schedule add --app <app-id> --task <task-key> --cron "<5字段>" --timezone <IANA> [--input-json <JSON> | --input <file>] [--disabled]
-  taskbase schedule list
-  taskbase schedule get <schedule-id>
-  taskbase schedule update <schedule-id> [--cron <expr>] [--timezone <IANA>] [--input-json <JSON>] [--enable | --disable]
-  taskbase schedule remove <schedule-id>
-  taskbase schedule run-now <schedule-id>
-  taskbase schedule runs <schedule-id>
-  taskbase task run <app-id/task-key> [--input <file|-> | --input-json <JSON>] [--idempotency-key <key>] [--wait] [--timeout <秒>]
-  taskbase task get <task-id>
-  taskbase task result <task-id>
-  taskbase task events <task-id> [--after <event-id>]
-  taskbase task logs <task-id> [--after <event-id>]
-  taskbase task close <task-id> [--reason <text>]
-  taskbase task retry <task-id>
-  taskbase task history [--app <app-id>] [--task-key <key>] [--status <status>] [--schedule <schedule-id>] [--limit <1-100>] [--cursor <cursor>]
-  taskbase artifact download <artifact-id> --out <path>
-  taskbase mac <pair|doctor|install|start|stop|status|logs|run|uninstall> [...]
-  taskbase transcribe <audio-url> [--title <text>] [--language <code>] [--episode-id <id>] [--show-id <id>] [--out <path>] [--no-wait] [--timeout <秒>]
+  yuxun login [--server <URL>] [--username <name>]
+  yuxun logout
+  yuxun apps list
+  yuxun app register <manifest.json>
+  yuxun app rotate-token <app-id>
+  yuxun schedule add --app <app-id> --task <task-key> --cron "<5字段>" --timezone <IANA> [--input-json <JSON> | --input <file>] [--disabled]
+  yuxun schedule list
+  yuxun schedule get <schedule-id>
+  yuxun schedule update <schedule-id> [--cron <expr>] [--timezone <IANA>] [--input-json <JSON>] [--enable | --disable]
+  yuxun schedule remove <schedule-id>
+  yuxun schedule run-now <schedule-id>
+  yuxun schedule runs <schedule-id>
+  yuxun task run <app-id/task-key> [--input <file|-> | --input-json <JSON>] [--idempotency-key <key>] [--wait] [--timeout <秒>]
+  yuxun task get <task-id>
+  yuxun task result <task-id>
+  yuxun task events <task-id> [--after <event-id>]
+  yuxun task logs <task-id> [--after <event-id>]
+  yuxun task close <task-id> [--reason <text>]
+  yuxun task retry <task-id>
+  yuxun task history [--app <app-id>] [--task-key <key>] [--status <status>] [--schedule <schedule-id>] [--limit <1-100>] [--cursor <cursor>]
+  yuxun artifact download <artifact-id> --out <path>
+  yuxun mac <pair|doctor|install|start|stop|status|logs|run|uninstall> [...]
+  yuxun transcribe <audio-url> [--title <text>] [--language <code>] [--episode-id <id>] [--show-id <id>] [--out <path>] [--no-wait] [--timeout <秒>]
 
 所有联网命令都可加 --server <URL>；未指定时依次使用 TASKBASE_URL、已登录服务器、${DEFAULT_SERVER}。`;
 }

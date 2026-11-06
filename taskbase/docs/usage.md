@@ -5,6 +5,8 @@
 
 ## 1. 它是什么
 
+CLI 命令名：`yuxun`。
+
 Taskbase 是一个单用户任务平台：
 
 ```text
@@ -22,7 +24,7 @@ Web / CLI（客户端）
 - `podcast-tools`：播客节目/单集列表、RSS 采集、调度
 - `transcription-tools`：单集音频转写、Markdown 产物
 
-Mac 上的 Transcription Worker 通过 Mac Agent 管理，登录后自动运行。
+Mac 上的 Transcription Worker 通过 Yuxun Mac 服务 管理，登录后自动运行。
 
 ## 2. 当前部署
 
@@ -68,18 +70,18 @@ npm install
 
 # 安装真正的全局命令（不依赖仓库路径）
 npm run install:global
-taskbase --help
+yuxun --help
 ```
 
 安装后会生成：
 
 ```text
-~/.local/bin/taskbase
-~/.local/bin/taskbase-mac-agent
-~/.local/share/taskbase/runtime/
+~/.local/bin/yuxun
+~/.local/bin/yuxun mac
+~/.local/share/yuxun/runtime/
 ```
 
-Mac Agent 的 LaunchAgent 也会指向这个 runtime，而不是代码仓库。
+Yuxun Mac 服务 的 macOS 后台服务 也会指向这个 runtime，而不是代码仓库。
 
 浏览器访问：
 
@@ -89,13 +91,13 @@ http://43.156.253.152/
 
 用 `owner` + 本地密码文件中的密码登录。
 
-### 3.2 确认 Mac Agent
+### 3.2 确认 Yuxun Mac 服务
 
 Mac 上：
 
 ```sh
 cd /Users/dynamic/Documents/GitHub/yuxu-dynamic/taskbase
-taskbase mac status
+yuxun mac status
 ```
 
 看到 `state = running` 即正常。
@@ -103,20 +105,20 @@ taskbase mac status
 如果未运行：
 
 ```sh
-taskbase mac start
+yuxun mac start
 ```
 
 如果还没安装：
 
 ```sh
-taskbase mac doctor
-taskbase mac install
+yuxun mac doctor
+yuxun mac install
 ```
 
 日志：
 
 ```sh
-taskbase mac logs
+yuxun mac logs
 ```
 
 ### 3.3 提交一次转写
@@ -135,9 +137,9 @@ CLI：
 cd taskbase
 export TASKBASE_URL='http://43.156.253.152'
 export TASKBASE_PASSWORD="$(cat .deploy/tencent-owner-password)"
-taskbase login
+yuxun login
 
-taskbase transcribe 'https://example.com/audio.mp3' \
+yuxun transcribe 'https://example.com/audio.mp3' \
   --title '单集标题' \
   --language zh \
   --out ./transcript.md
@@ -210,7 +212,7 @@ taskbase transcribe 'https://example.com/audio.mp3' \
 
 ```sh
 cd taskbase
-taskbase help
+yuxun help
 ```
 
 ### 登录
@@ -218,7 +220,7 @@ taskbase help
 ```sh
 export TASKBASE_URL='http://43.156.253.152'
 export TASKBASE_PASSWORD="$(cat .deploy/tencent-owner-password)"
-taskbase login
+yuxun login
 ```
 
 Session 默认保存在 `~/.config/taskbase/session.json`，权限 600。
@@ -226,20 +228,20 @@ Session 默认保存在 `~/.config/taskbase/session.json`，权限 600。
 ### 应用与任务
 
 ```sh
-taskbase apps list
-taskbase task history --limit 20
-taskbase task get <task-id>
-taskbase task events <task-id>
-taskbase task logs <task-id>
-taskbase task result <task-id>
-taskbase task close <task-id> --reason 'wrong input'
-taskbase task retry <task-id>
+yuxun apps list
+yuxun task history --limit 20
+yuxun task get <task-id>
+yuxun task events <task-id>
+yuxun task logs <task-id>
+yuxun task result <task-id>
+yuxun task close <task-id> --reason 'wrong input'
+yuxun task retry <task-id>
 ```
 
 ### 转写
 
 ```sh
-taskbase transcribe '<audio-url>' \
+yuxun transcribe '<audio-url>' \
   --title '标题' \
   --language zh \
   --out ./transcript.md
@@ -267,12 +269,12 @@ taskbase transcribe '<audio-url>' \
 ### 产物
 
 ```sh
-taskbase artifact download <artifact-id> --out ./transcript.md
+yuxun artifact download <artifact-id> --out ./transcript.md
 ```
 
-## 6. Mac Agent
+## 6. Yuxun Mac 服务
 
-Mac Agent 是 LaunchAgent 管理的 Transcription Worker，不是独立任务平台。
+Yuxun Mac 服务是 macOS 后台服务管理的 Transcription Worker，不是独立任务平台。
 
 ### 当前配置
 
@@ -280,8 +282,8 @@ Mac Agent 是 LaunchAgent 管理的 Transcription Worker，不是独立任务平
 | --- | --- |
 | 环境文件 | `~/.config/taskbase/mac-agent.env` |
 | 配置 | `~/.config/taskbase/mac-agent.json` |
-| LaunchAgent | `~/Library/LaunchAgents/com.taskbase.mac-agent.plist` |
-| 日志 | `~/Library/Logs/taskbase-agent.log` |
+| macOS 后台服务 | `~/Library/LaunchAgents/com.yuxun.worker.plist` |
+| 日志 | `~/Library/Logs/yuxun-worker.log` |
 | 数据目录 | `~/Library/Application Support/TaskbaseAgent` |
 
 ### 配对
@@ -295,7 +297,7 @@ cat taskbase/.deploy/transcription-worker-token
 重新配对：
 
 ```sh
-taskbase mac pair \
+yuxun mac pair \
   --server 'http://43.156.253.152' \
   --token '<Transcription Worker Token>' \
   --provider whisper \
@@ -305,7 +307,7 @@ taskbase mac pair \
 ### 检查
 
 ```sh
-taskbase mac doctor
+yuxun mac doctor
 ```
 
 会检查：
@@ -319,23 +321,23 @@ taskbase mac doctor
 ### 安装、启停、日志
 
 ```sh
-taskbase mac install
-taskbase mac start
-taskbase mac stop
-taskbase mac status
-taskbase mac logs
+yuxun mac install
+yuxun mac start
+yuxun mac stop
+yuxun mac status
+yuxun mac logs
 ```
 
 卸载（保留配置）：
 
 ```sh
-taskbase mac uninstall
+yuxun mac uninstall
 ```
 
 卸载并清除配置：
 
 ```sh
-taskbase mac uninstall -- --purge
+yuxun mac uninstall -- --purge
 ```
 
 ### Provider
@@ -367,8 +369,8 @@ TRANSCRIPTION_MODEL=scribe_v2
 修改后重启：
 
 ```sh
-taskbase mac stop
-taskbase mac start
+yuxun mac stop
+yuxun mac start
 ```
 
 ## 7. 转写内部流程
@@ -471,8 +473,8 @@ curl -H 'Host: 43.156.253.152' http://127.0.0.1/api/health
 
 ### 任务一直 queued
 
-- 检查 Mac Agent：`taskbase mac status`
-- 检查日志：`taskbase mac logs`
+- 检查 Yuxun Mac 服务：`yuxun mac status`
+- 检查日志：`yuxun mac logs`
 - 检查 Worker Token 是否属于 `transcription-tools`
 
 ### 转写 401/403
@@ -480,9 +482,9 @@ curl -H 'Host: 43.156.253.152' http://127.0.0.1/api/health
 重新轮换 Token 并重新配对：
 
 ```sh
-taskbase mac uninstall
-taskbase mac pair --server ... --token ...
-taskbase mac install
+yuxun mac uninstall
+yuxun mac pair --server ... --token ...
+yuxun mac install
 ```
 
 ### whisper 找不到
@@ -528,7 +530,7 @@ Mac 睡眠期间 Worker 无法心跳，租约可能过期。醒来后会进入�
 ## 12. 相关文档
 
 - [README](../README.md)
-- [Mac Agent](mac-agent.md)
+- [Yuxun Mac 服务](yuxun-mac-service.md)
 - [架构](architecture.md)
 - [腾讯云部署](deploy-tencent.md)
 - [RSS 来源](rss-sources.md)

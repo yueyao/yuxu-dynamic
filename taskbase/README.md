@@ -2,7 +2,7 @@
 
 位于 `yuxu-dynamic` 仓库中的独立 Taskbase 工程。
 
-> 完整使用方法见 [Taskbase 使用文档](docs/usage.md)。
+> CLI 命令名：`yuxun`（Yuxun CLI）。完整使用方法见 [Taskbase 使用文档](docs/usage.md)。
 
 当前包含三层：
 
@@ -82,9 +82,9 @@
 cd taskbase
 npm install
 
-# 安装全局 taskbase / taskbase-mac-agent（脱离仓库路径）
+# 安装全局 yuxun CLI（脱离仓库路径）
 npm run install:global
-taskbase --help
+yuxun --help
 
 # 1. 初始化所有者
 export TASKBASE_OWNER_PASSWORD='change-me-to-a-long-password'
@@ -118,9 +118,9 @@ CLI 仍可用：
 ```sh
 export TASKBASE_URL='http://127.0.0.1:3333'
 export TASKBASE_PASSWORD='change-me-to-a-long-password'
-taskbase login
-taskbase apps list
-taskbase task history --limit 20
+yuxun login
+yuxun apps list
+yuxun task history --limit 20
 ```
 
 ## Web 页面与截图
@@ -145,18 +145,18 @@ CLI 是转写任务的**客户端**，不替代服务端 Worker：
 - 默认等待 6 小时；`--no-wait` 只提交
 - 任务会出现在 Web「采集任务」中
 
-## Mac Agent（本地转写 Worker）
+## Yuxun Mac 服务（本地转写 Worker）
 
-Mac Agent 把远端 Taskbase 和本机 Whisper Worker 配对起来，登录后可通过 LaunchAgent 后台运行：
+Yuxun Mac 服务把远端 Taskbase 和本机 Whisper Worker 配对起来，作为 macOS 后台服务运行：
 
 ```sh
-taskbase mac pair --server 'http://43.156.253.152' --token '<Worker Token>'
-taskbase mac doctor
-taskbase mac install
-taskbase mac status
+yuxun mac pair --server 'http://43.156.253.152' --token '<Worker Token>'
+yuxun mac doctor
+yuxun mac install
+yuxun mac status
 ```
 
-详见 [Mac Agent 文档](docs/mac-agent.md)。
+详见 [Yuxun Mac 服务 文档](docs/yuxun-mac-service.md)。
 
 ## 腾讯云部署
 
@@ -207,21 +207,21 @@ npm run worker:demo       # Demo Worker
 npm run worker:podcast    # 播客 Worker
 npm run worker:transcription  # 本地转写 Worker
 
-taskbase login
-taskbase apps list
-taskbase app register demo/manifest.json
-taskbase task history --limit 20
-taskbase task get <task_id>
-taskbase task logs <task_id> --after 0
-taskbase task close <task_id> --reason 'wrong input'
-taskbase task retry <task_id>
-taskbase schedule list
+yuxun login
+yuxun apps list
+yuxun app register demo/manifest.json
+yuxun task history --limit 20
+yuxun task get <task_id>
+yuxun task logs <task_id> --after 0
+yuxun task close <task_id> --reason 'wrong input'
+yuxun task retry <task_id>
+yuxun schedule list
 
 # 转写：提交给 transcription-tools Worker，等待并下载 Markdown
-taskbase transcribe 'https://example.com/audio.mp3' \
+yuxun transcribe 'https://example.com/audio.mp3' \
   --title '单集标题' --language zh --out ./transcript.md
 # 只提交不等待
-taskbase transcribe 'https://example.com/audio.mp3' --no-wait
+yuxun transcribe 'https://example.com/audio.mp3' --no-wait
 ```
 
 ## 配置

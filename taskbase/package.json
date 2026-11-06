@@ -1,9 +1,9 @@
 {
-  "name": "taskbase",
-  "version": "0.3.0",
+  "name": "yuxun",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "个人远程任务平台底座（独立工程）",
+  "description": "玉虚个人远程任务平台 CLI 与 Mac 转写服务",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -26,7 +26,8 @@
     "mac:logs": "node scripts/mac-agent.ts logs",
     "mac:run": "node scripts/mac-agent.ts run",
     "mac:uninstall": "node scripts/mac-agent.ts uninstall",
-    "install:global": "node scripts/install-global.ts"
+    "install:global": "node scripts/install-global.ts",
+    "yuxun": "node src/cli.ts"
   },
   "dependencies": {
     "fast-xml-parser": "^5.12.0"
