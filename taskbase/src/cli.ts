@@ -152,7 +152,7 @@ async function taskInput(args: string[]): Promise<unknown> {
   try { return JSON.parse(raw) as unknown; } catch { throw new Error('任务输入不是有效 JSON'); }
 }
 
-async function waitTask(server: string, token: string, taskId: string, timeoutSeconds: number): Promise<void> {
+async function waitTask(server: string, token: string, taskId: string, timeoutSeconds: number): Promise<unknown> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let cursor = 0;
   while (true) {
@@ -168,7 +168,7 @@ async function waitTask(server: string, token: string, taskId: string, timeoutSe
       const result = await request(server, `/v1/tasks/${encodeURIComponent(taskId)}/result`, { token });
       print(result.data);
       if (task.status !== 'succeeded') process.exitCode = 1;
-      return;
+      return result.data;
     }
     if (Date.now() >= deadline) {
       throw new Error(`等待任务超时；任务仍在平台运行，可稍后执行 taskbase task result ${taskId}`);
@@ -200,6 +200,7 @@ function usage(): string {
   taskbase task retry <task-id>
   taskbase task history [--app <app-id>] [--task-key <key>] [--status <status>] [--schedule <schedule-id>] [--limit <1-100>] [--cursor <cursor>]
   taskbase artifact download <artifact-id> --out <path>
+  taskbase transcribe <audio-url> [--title <text>] [--language <code>] [--episode-id <id>] [--show-id <id>] [--out <path>] [--no-wait] [--timeout <秒>]
 
 所有联网命令都可加 --server <URL>；未指定时依次使用 TASKBASE_URL、已登录服务器、${DEFAULT_SERVER}。`;
 }
@@ -231,6 +232,60 @@ async function main(args = process.argv.slice(2)): Promise<void> {
 
   const server = await resolveServer(explicitServer);
   const token = await authenticated(server);
+
+  if (args[0] === 'transcribe') {
+    const audioUrl = args[1];
+    if (!audioUrl || audioUrl.startsWith('--')) throw new Error('缺少音频 URL');
+    let parsed: URL;
+    try { parsed = new URL(audioUrl); } catch { throw new Error('音频 URL 无效'); }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('音频 URL 必须是 http(s)');
+    }
+    const input: Record<string, unknown> = { audio_url: parsed.toString() };
+    const title = option(args, '--title');
+    const language = option(args, '--language');
+    const episodeId = option(args, '--episode-id');
+    const showId = option(args, '--show-id');
+    if (title) input.title = title;
+    if (language) input.language = language;
+    if (episodeId) input.episode_id = episodeId;
+    if (showId) input.show_id = showId;
+    const headers: Record<string, string> = {};
+    const idempotencyKey = option(args, '--idempotency-key');
+    if (idempotencyKey) headers['idempotency-key'] = idempotencyKey;
+    const response = await fetch(new URL('/v1/tasks', server), {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({ task: 'transcription-tools/episode/transcribe', input }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const data = JSON.parse(await response.text()) as unknown;
+    if (!response.ok) throw new Error(JSON.stringify(data));
+    print(data);
+    const taskId = (data as { task: { task_id: string } }).task.task_id;
+    if (has(args, '--no-wait')) return;
+    const rawTimeout = option(args, '--timeout');
+    const timeout = rawTimeout === undefined ? 21_600 : Number(rawTimeout);
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 86_400) {
+      throw new Error('--timeout 必须是 1–86400 秒的整数');
+    }
+    const result = await waitTask(server, token, taskId, timeout) as {
+      status?: string; artifact_id?: string | null; output?: { artifact_id?: string } | null;
+    };
+    if (result.status !== 'succeeded') return;
+    const artifactId = result.artifact_id ?? result.output?.artifact_id;
+    if (!artifactId) throw new Error('任务成功但没有产物 artifact_id');
+    const out = option(args, '--out') ?? `transcript-${taskId.slice(0, 8)}.md`;
+    const target = resolve(out);
+    const artifact = await fetch(new URL(`/v1/artifacts/${encodeURIComponent(artifactId)}/download`, server), {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!artifact.ok) throw new Error(await artifact.text());
+    await writeFile(target, Buffer.from(await artifact.arrayBuffer()), { flag: 'wx', mode: 0o600 });
+    console.log(`转写稿已保存到 ${target}`);
+    return;
+  }
 
   if (args[0] === 'apps' && args[1] === 'list') {
     print((await request(server, '/v1/apps', { token })).data);

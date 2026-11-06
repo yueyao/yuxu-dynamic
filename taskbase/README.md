@@ -127,6 +127,16 @@ npm run cli -- task history --limit 20
 
 [RSS 来源与首批栏目](docs/rss-sources.md)：已通过 Apple Podcasts 搜索找到 9 个中文栏目 feed，并实测《忽左忽右》入库 203 集。Podcast Index 可作为后续补充发现层。
 
+## CLI 与转写
+
+CLI 是转写任务的**客户端**，不替代服务端 Worker：
+
+- CLI 负责提交 `transcription-tools/episode/transcribe`、等待、下载 Markdown
+- 实际 ASR 仍由本机 Transcription Worker 执行
+- 输入必须是公开 HTTP(S) 音频 URL；本机音频文件暂不支持直接上传
+- 默认等待 6 小时；`--no-wait` 只提交
+- 任务会出现在 Web「采集任务」中
+
 ## 腾讯云部署
 
 已部署到腾讯云 Lighthouse：
@@ -185,6 +195,12 @@ npm run cli -- task logs <task_id> --after 0
 npm run cli -- task close <task_id> --reason 'wrong input'
 npm run cli -- task retry <task_id>
 npm run cli -- schedule list
+
+# 转写：提交给 transcription-tools Worker，等待并下载 Markdown
+npm run cli -- transcribe 'https://example.com/audio.mp3' \
+  --title '单集标题' --language zh --out ./transcript.md
+# 只提交不等待
+npm run cli -- transcribe 'https://example.com/audio.mp3' --no-wait
 ```
 
 ## 配置
