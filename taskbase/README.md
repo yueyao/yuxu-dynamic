@@ -1,6 +1,8 @@
-# Taskbase 底座 v0.2 + 播客 Web + 本地转写
+# Taskbase 底座 v0.3 + 播客 Web + 本地转写
 
-独立的个人任务平台工程，和现有 `yuxu-dynamic` 仓库代码无关。
+位于 `yuxu-dynamic` 仓库中的独立 Taskbase 工程。
+
+> 完整使用方法见 [Taskbase 使用文档](docs/usage.md)。
 
 当前包含三层：
 
