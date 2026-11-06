@@ -227,6 +227,61 @@ RSS 来源优先级：用户填写的 RSS → 页面 `<link rel="alternate" type
 
 ## 9. 转写流程
 
+### 一次播客转写任务的完整流程
+
+![一次播客转写任务完整流程](diagrams/transcription-flow.png)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 用户 / Web UI
+    participant W as Web Server
+    participant P as Platform API
+    participant Q as SQLite / Queue
+    participant K as Mac Worker
+    participant A as 音频源 / ASR
+
+    U->>W: 点击单集「转写」
+    W->>Q: 读取单集 audio_url / title / episode_id
+    W->>P: POST /v1/tasks（transcription-tools/episode/transcribe）
+    P->>Q: schema 校验 + 写 queued task + event
+    P-->>W: 202 task
+    W-->>U: 任务已排队
+
+    K->>P: POST /v1/worker/leases
+    P->>Q: lease + attempt
+    P-->>K: 下发任务详情 input
+
+    K->>A: 安全下载音频（HTTPS / DNS / 重定向 / 500MiB）
+    K->>K: ffmpeg 16k 单声道 WAV
+    K->>K: 按 TRANSCRIPTION_CHUNK_SECONDS 切片（默认 600s）
+
+    loop 每个切片
+        K->>A: ASR（Whisper / FunASR / ElevenLabs）
+        A-->>K: text + segments
+        K->>P: progress + saveStep asr-chunk-N
+    end
+
+    K->>K: 合并 text + segments（加 offset）
+    K->>P: PUT transcript.md 产物
+    P->>Q: 保存 artifact 元数据
+    K->>P: complete(output)
+    P->>Q: 校验 output schema，标记 succeeded + event
+
+    U->>W: 打开 /#/transcript/:episode
+    W->>Q: 本地 transcription_transcripts 或 task output fallback
+    Q-->>W: transcript
+    W-->>U: transcript JSON
+    U->>U: 渲染 Markdown 阅读页（不下载）
+```
+
+失败与恢复：
+
+- Worker 主动失败 → `failed`
+- 租约过期 → `recovering`
+- 人工关闭/执行超时/排队超时/尝试耗尽 → `closed`
+- 重试 → 新任务，记录 `retry_of_task_id`
+
 ```text
 Web 单集 → “转写”
   → 平台创建 transcription-tools/episode/transcribe

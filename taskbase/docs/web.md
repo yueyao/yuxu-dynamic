@@ -65,6 +65,8 @@ cat taskbase/.deploy/tencent-owner-password
 
 ### 阅读转写稿
 
+完整任务流程见 [转写全流程图](diagrams/transcription-flow.png)。
+
 转写完成后，在单集里点击「转写稿」，会进入：
 
 ```text

@@ -304,8 +304,93 @@ def schedule_flow() -> None:
     image.save(OUT / 'schedule-flow.png')
 
 
+
+def transcription_flow() -> None:
+    width, height = 1840, 1710
+    image, draw = canvas(width, height)
+    text(draw, (50, 30), '一次播客转写任务：完整流程', 36, INK)
+    text(draw, (50, 78), 'Web 创建任务 · Worker 通过 lease 领取 · 下载/切片/ASR/上传产物 · Web 渲染 Markdown', 17, MUTED)
+
+    actors = [
+        (80, 280, 'Web UI', '用户 / 单集页 / 转写稿页', CLIENT),
+        (410, 280, 'Web Server', '会话 / CSRF / 播客 API', SERVICE),
+        (740, 280, 'Platform API', '任务 / 队列 / 事件 / 产物', API),
+        (1070, 280, 'SQLite / Queue', 'tasks / steps / artifacts', DATA),
+        (1400, 300, 'Mac Worker (Yuxun)', 'lease / heartbeat / ASR', WORKER),
+        (1660, 150, 'ASR', '音频源 / Provider', ART),
+    ]
+    # compact ASR actor at right edge
+    centers = {}
+    for x, w, title, subtitle, (fill, border) in actors:
+        box(draw, x, 110, w, 70, title, (subtitle,), fill, border, title_size=19, body_size=12)
+        centers[title.split('\n')[0]] = x + w // 2
+    # lifelines
+    for x, w, title, subtitle, _ in actors:
+        cx = x + w // 2
+        dashed_line(draw, [(cx, 180), (cx, 1600)], '#c3cfdb', 2)
+
+    ui = centers['Web UI']; web = centers['Web Server']; api = centers['Platform API']
+    db = centers['SQLite / Queue']; worker = centers['Mac Worker (Yuxun)']; asr = centers['ASR']
+
+    steps = [
+        (230, ui, web, '① 点击单集「转写」'),
+        (285, web, db, '② 读取 episode.audio_url'),
+        (340, web, api, '③ POST /v1/tasks'),
+        (395, api, db, '④ 校验 input，写 queued + event'),
+        (450, api, web, '⑤ 202 task'),
+        (505, web, ui, '⑥ 任务已排队'),
+        (585, worker, api, '⑦ POST /v1/worker/leases'),
+        (640, api, db, '⑧ lease + attempt'),
+        (695, api, worker, '⑨ 下发任务详情 input'),
+        (765, worker, asr, '⑩ 安全下载音频'),
+        (830, worker, worker, '⑪ ffmpeg 16k mono + 600s 切片'),
+        (915, worker, asr, '⑫ 逐片 ASR'),
+        (970, asr, worker, 'text + segments'),
+        (1035, worker, api, '⑬ progress / saveStep asr-chunk-N'),
+        (1110, worker, api, '⑭ PUT transcript.md'),
+        (1145, api, db, 'artifact 元数据'),
+        (1205, worker, api, '⑮ complete output'),
+        (1260, api, db, 'succeeded + event'),
+        (1335, ui, web, '⑯ 打开 /#/transcript/:episode'),
+        (1390, web, db, '本地转写表 / task output fallback'),
+        (1445, web, ui, 'transcript JSON'),
+        (1510, ui, ui, '⑰ 渲染 Markdown（不下载）'),
+    ]
+    for y, x1, x2, label in steps:
+        if x1 == x2:
+            # self loop: small box-to-box loop
+            draw.line([(x1, y), (x1 + 42, y), (x1 + 42, y + 22), (x1 + 8, y + 22)],
+                      fill='#5f7184', width=3)
+            arrow(draw, [(x1 + 8, y + 22), (x1, y + 18)], '#5f7184')
+            text(draw, (x1 + 52, y + 7), label, 11, MUTED)
+            continue
+        color = '#4f8f68' if worker in (x1, x2) else '#5f7184'
+        if api in (x1, x2) and db in (x1, x2):
+            color = '#7c8ea2'
+        direction = 1 if x2 > x1 else -1
+        arrow(draw, [(x1 + 6 * direction, y), (x2 - 6 * direction, y)], color)
+        mid = (x1 + x2) // 2
+        bbox = draw.textbbox((mid, y - 11), label, font=font(11), anchor='mm')
+        draw.rounded_rectangle((bbox[0] - 4, bbox[1] - 2, bbox[2] + 4, bbox[3] + 2), radius=4, fill=BG)
+        text(draw, (mid, y - 11), label, 11, MUTED, anchor='mm')
+
+    # per-chunk loop highlight
+    dashed_rect(draw, 735, 885, 1110, 190, '#b8a3dd')
+    text(draw, (750, 895), '逐片循环：每片完成即 saveStep；恢复时复用', 12, '#7a67a6')
+
+    # failure / retry notes
+    box(draw, 80, 1590, 760, 92, '失败与恢复',
+        ('失败 → failed；租约过期 → recovering；超时/人工/尝试耗尽 → closed；重试 → 新任务 retry_of_task_id',),
+        '#fdecec', '#e39a9a', title_size=17, body_size=12)
+    box(draw, 880, 1590, 880, 92, '关键约束',
+        ('Worker 只向服务端领取任务，不依赖 CLI 传入 URL；临时音频默认删除；Markdown 为最终产物',),
+        '#eef2f7', '#a9b8c9', title_size=17, body_size=12)
+    image.save(OUT / 'transcription-flow.png')
+
+
 if __name__ == '__main__':
     architecture()
     task_flow()
     schedule_flow()
+    transcription_flow()
     print('diagrams written to', OUT)

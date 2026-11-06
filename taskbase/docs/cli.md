@@ -115,6 +115,8 @@ yuxun artifact download <artifact-id> --out ./transcript.md
 
 这是最容易混淆的一点。
 
+完整流程图见 [一次播客转写任务全流程](diagrams/transcription-flow.png)。
+
 ### Worker 是执行端
 
 Mac 后台的转写 Worker 会主动请求服务端：
