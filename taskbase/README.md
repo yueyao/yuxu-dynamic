@@ -99,7 +99,7 @@ npm run web
 # 浏览器打开 http://127.0.0.1:3334，用 owner + 密码登录
 
 # 4. 在 Web「节目库」点击“注册播客应用”，保存一次性 Worker Token
-export TASKBASE_WORKER_TOKEN='<Worker Token>'
+export TASKBASE_WORKER_TOKEN='<Podcast Worker Token>'
 npm run worker:podcast
 
 # 5. 在 Web 节目库添加节目：
@@ -108,7 +108,7 @@ npm run worker:podcast
 #    然后点击“同步”或“采集两年”
 
 # 6. 在 Web「节目库」点击“注册转写应用”，保存转写 Worker Token
-export TASKBASE_WORKER_TOKEN='<转写 Worker Token>'
+export YUXUN_WORKER_TOKEN='<转写 Worker Token>'
 npm run worker:transcription
 
 # 7. 打开节目单集 → “转写”，完成后点“转写稿”查看/下载 Markdown
@@ -117,8 +117,8 @@ npm run worker:transcription
 CLI 仍可用：
 
 ```sh
-export TASKBASE_URL='http://127.0.0.1:3333'
-export TASKBASE_PASSWORD='change-me-to-a-long-password'
+export YUXUN_URL='http://127.0.0.1:3333'
+export YUXUN_PASSWORD='change-me-to-a-long-password'
 yuxun login
 yuxun apps list
 yuxun task history --limit 20
@@ -146,18 +146,18 @@ CLI 是转写任务的**客户端**，不替代服务端 Worker：
 - 默认等待 6 小时；`--no-wait` 只提交
 - 任务会出现在 Web「采集任务」中
 
-## Yuxun Mac 服务（本地转写 Worker）
+## Yuxun Worker（Mac 后台服务）
 
-Yuxun Mac 服务把远端 Taskbase 和本机 Whisper Worker 配对起来，作为 macOS 后台服务运行：
+Yuxun Worker 把远端 Taskbase 和本机 Whisper Worker 配对起来，通过 `yuxun worker` 管理：
 
 ```sh
-yuxun mac pair --server 'http://43.156.253.152' --token '<Worker Token>'
-yuxun mac doctor
-yuxun mac install
-yuxun mac status
+yuxun worker pair --server 'http://43.156.253.152' --token '<Worker Token>'
+yuxun worker doctor
+yuxun worker install
+yuxun worker status
 ```
 
-详见 [Yuxun Mac 服务文档](docs/yuxun-mac-service.md)。
+详见 [Yuxun CLI 文档](docs/cli.md)。
 
 ## 腾讯云部署
 
@@ -229,9 +229,9 @@ yuxun transcribe 'https://example.com/audio.mp3' --no-wait
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `TASKBASE_DATA_DIR` | `.data` | 数据目录（DB、产物） |
+| `YUXUN_DATA_DIR` / `TASKBASE_DATA_DIR` | `.data` | 数据目录（DB、产物） |
 | `TASKBASE_HOST` / `TASKBASE_PORT` | `127.0.0.1` / `3333` | 平台 API 监听地址 |
-| `TASKBASE_URL` | `http://127.0.0.1:3333` | CLI / Web Server 访问平台 API 的地址 |
+| `YUXUN_URL` / `TASKBASE_URL` | `http://127.0.0.1:3333` | CLI / Worker 访问平台 API |
 | `TASKBASE_WEB_HOST` / `TASKBASE_WEB_PORT` | `127.0.0.1` / `3334` | Web 端监听地址 |
 | `TASKBASE_WEB_SESSION_TTL_MS` | `43200000`（12 小时） | Web 会话有效期 |
 | `TASKBASE_WEB_COOKIE_SECURE` | 无 | 设为 `1` 时 Cookie 加 `Secure`（HTTPS 部署） |
@@ -253,9 +253,9 @@ yuxun transcribe 'https://example.com/audio.mp3' --no-wait
 | `TASKBASE_CONFIG_DIR` | `~/.config/taskbase` | CLI 会话目录 |
 | `TASKBASE_OWNER_USERNAME` | `owner` | 初始化用户名 |
 | `TASKBASE_OWNER_PASSWORD` | 无 | bootstrap 密码 |
-| `TASKBASE_PASSWORD` | 无 | CLI 非交互登录密码 |
-| `TASKBASE_WORKER_TOKEN` | 无 | Worker 凭据（Demo / Podcast） |
-| `TASKBASE_POLL_MS` / `TASKBASE_HEARTBEAT_MS` | `1000` / `15000` | Worker 轮询/心跳 |
+| `YUXUN_PASSWORD` / `TASKBASE_PASSWORD` | 无 | CLI 非交互登录密码 |
+| `YUXUN_WORKER_TOKEN` / `TASKBASE_WORKER_TOKEN` | 无 | Worker 凭据 |
+| `YUXUN_POLL_MS` / `YUXUN_HEARTBEAT_MS` | `2000` / `15000` | Worker 轮询/心跳 |
 
 ## 播客规则
 

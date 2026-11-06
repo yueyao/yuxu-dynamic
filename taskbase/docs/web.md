@@ -150,8 +150,8 @@ Token：
 在 Mac 上：
 
 ```sh
-yuxun mac status
-yuxun mac logs
+yuxun worker status
+yuxun worker logs
 ```
 
 确认 Worker 运行、Token 正确、`whisper`/`ffmpeg` 可用。
@@ -167,5 +167,4 @@ yuxun mac logs
 ## 8. 相关文档
 
 - [Yuxun CLI 使用文档](cli.md)
-- [Yuxun Mac 服务](yuxun-mac-service.md)
 - [Taskbase 使用文档索引](usage.md)

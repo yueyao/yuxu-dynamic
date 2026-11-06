@@ -81,8 +81,8 @@ Podcast Worker 已在服务器运行；转写应用已注册，但**转写 Worke
 ```sh
 cd /Users/dynamic/Documents/GitHub/yuxu-dynamic/taskbase
 
-TASKBASE_URL='http://43.156.253.152' \
-TASKBASE_WORKER_TOKEN="$(cat .deploy/transcription-worker-token)" \
+YUXUN_URL='http://43.156.253.152' \
+YUXUN_WORKER_TOKEN="$(cat .deploy/transcription-worker-token)" \
 npm run worker:transcription
 ```
 

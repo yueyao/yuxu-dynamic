@@ -29,26 +29,31 @@ npm run install:global
 yuxun --help
 ```
 
+```sh
+yuxun version
+yuxun --help
+```
+
 确认 `~/.local/bin` 在 PATH 中：
 
 ```sh
 command -v yuxun
 ```
 
-当前运行时还包含 Web/demo/deploy 等文件；最小包迁移见 [CLI 架构审计](cli-architecture.md)。
+全局运行时只包含 CLI 与 Worker 所需文件：`src/`、`scripts/`、`package.json`、`README.md`。
 
 ## 2. 登录
 
 ```sh
-export TASKBASE_URL='http://43.156.253.152'
-export TASKBASE_PASSWORD="$(cat taskbase/.deploy/tencent-owner-password)"
+export YUXUN_URL='http://43.156.253.152'
+export YUXUN_PASSWORD="$(cat taskbase/.deploy/tencent-owner-password)"
 yuxun login
 ```
 
 Session 默认保存到：
 
 ```text
-~/.config/taskbase/session.json
+~/.config/yuxun/session.json
 ```
 
 权限 600。登录 Token 有效期 90 天。
@@ -170,51 +175,51 @@ yuxun transcribe '<audio-url>' \
 
 当前限制：只接受公开 HTTP(S) URL，不支持直接上传本机音频文件。
 
-## 7. Mac 后台服务
+## 7. Worker 与 macOS 后台服务
 
 ```sh
-yuxun mac pair \
+yuxun doctor
+yuxun worker pair \
   --server 'http://43.156.253.152' \
   --token '<Transcription Worker Token>' \
   --provider whisper \
   --model small
 
-yuxun mac doctor
-yuxun mac install
-yuxun mac start
-yuxun mac stop
-yuxun mac status
-yuxun mac logs
-yuxun mac uninstall
+yuxun worker doctor
+yuxun worker install
+yuxun worker start
+yuxun worker stop
+yuxun worker status
+yuxun worker logs
+yuxun worker uninstall
 ```
 
 ### 当前实际文件
 
 | 项 | 路径 |
 | --- | --- |
-| Worker 环境 | `~/.config/taskbase/mac-agent.env` |
-| Worker 配置 | `~/.config/taskbase/mac-agent.json` |
-| 数据 | `~/Library/Application Support/TaskbaseAgent` |
+| Worker 环境 | `~/.config/yuxun/worker.env` |
+| Worker 配置 | `~/.config/yuxun/worker.json` |
+| 数据 | `~/Library/Application Support/Yuxun` |
 | 后台服务 | `~/Library/LaunchAgents/com.yuxun.worker.plist` |
 | 日志 | `~/Library/Logs/yuxun-worker.log` |
 
-这些 `taskbase` 命名属于**未完成的迁移**，目标路径是 `~/.config/yuxun/` 和 `~/Library/Application Support/Yuxun/`。迁移方案见 [CLI 架构审计](cli-architecture.md)。
+旧路径 `~/.config/taskbase/mac-agent.env` / `TaskbaseAgent` 会在 `pair/doctor/install` 时自动迁移，保留 Token 和服务地址。
 
-### 当前后台服务的启动方式
+### 后台服务入口
 
-当前后台服务直接运行：
-
-```text
-runtime/src/transcription/worker.ts
-```
-
-即 Worker 入口。下一步会改成统一从 CLI 运行：
+LaunchAgent 现在执行：
 
 ```text
-yuxun worker run
+node --env-file=~/.config/yuxun/worker.env \
+  ~/.local/share/yuxun/runtime/src/cli.ts worker run
 ```
 
-在迁移完成前，使用 `yuxun mac ...` 管理。
+也就是说：
+
+- Worker 通过 `yuxun` CLI 启动
+- `yuxun worker run` 自己向服务端请求任务
+- 不需要用户在命令行传音频链接
 
 ### Worker Token
 
@@ -224,7 +229,7 @@ yuxun worker run
 cat taskbase/.deploy/transcription-worker-token
 ```
 
-Token 一旦轮换，需要重新执行 `yuxun mac pair`。
+Token 一旦轮换，需要重新执行 `yuxun worker pair`。
 
 ## 8. 配置与环境变量
 
@@ -232,13 +237,13 @@ Token 一旦轮换，需要重新执行 `yuxun mac pair`。
 
 | 变量 | 说明 |
 | --- | --- |
-| `TASKBASE_URL` | 远端 Platform 地址 |
-| `TASKBASE_PASSWORD` | 非交互登录密码 |
-| `TASKBASE_CONFIG_DIR` | CLI 配置目录 |
-| `TASKBASE_WORKER_TOKEN` | Transcription Worker Token |
-| `TASKBASE_DATA_DIR` | Worker 本地数据目录 |
-| `TASKBASE_POLL_MS` | Worker 轮询间隔 |
-| `TASKBASE_HEARTBEAT_MS` | Worker 心跳间隔 |
+| `YUXUN_URL` | 远端 Platform 地址 |
+| `YUXUN_PASSWORD` / `TASKBASE_PASSWORD` | 非交互登录密码 |
+| `YUXUN_CONFIG_DIR` | CLI 配置目录 |
+| `YUXUN_WORKER_TOKEN` | Transcription Worker Token |
+| `YUXUN_DATA_DIR` | Worker 本地数据目录 |
+| `YUXUN_POLL_MS` | Worker 轮询间隔 |
+| `YUXUN_HEARTBEAT_MS` | Worker 心跳间隔 |
 
 转写变量：
 
@@ -281,10 +286,10 @@ cd /Users/dynamic/Documents/GitHub/yuxu-dynamic/taskbase
 git pull
 npm install
 npm run install:global
-yuxun mac install
+yuxun worker install
 ```
 
-`yuxun mac install` 会重新写入后台服务并重启。
+`yuxun worker install` 会重新写入后台服务并重启。
 
 ## 11. 排错
 
@@ -299,13 +304,13 @@ npm run install:global
 
 - 用户名 `owner`
 - 密码读 `taskbase/.deploy/tencent-owner-password`
-- 检查 `TASKBASE_URL`
+- 检查 `YUXUN_URL`（兼容旧 `TASKBASE_URL`）
 
 ### 任务一直排队
 
 ```sh
-yuxun mac status
-yuxun mac logs
+yuxun worker status
+yuxun worker logs
 ```
 
 检查 Worker 是否运行、Token 是否属于 `transcription-tools`。
@@ -317,7 +322,7 @@ which whisper
 which ffmpeg
 ```
 
-在 `~/.config/taskbase/mac-agent.env` 设置绝对路径，例如：
+在 `~/.config/yuxun/worker.env` 设置绝对路径，例如：
 
 ```sh
 TRANSCRIPTION_WHISPER_BIN=/absolute/path/to/whisper
@@ -326,9 +331,9 @@ TRANSCRIPTION_WHISPER_BIN=/absolute/path/to/whisper
 ### 后台服务无法启动
 
 ```sh
-yuxun mac doctor
-yuxun mac install
-yuxun mac status
+yuxun worker doctor
+yuxun worker install
+yuxun worker status
 ```
 
 必要时在正常 Terminal 中执行，避免受限终端环境。
@@ -336,6 +341,5 @@ yuxun mac status
 ## 12. 相关文档
 
 - [Yuxun Web 使用文档](web.md)
-- [Yuxun Mac 服务](yuxun-mac-service.md)
 - [CLI 架构审计](cli-architecture.md)
 - [腾讯云部署](deploy-tencent.md)

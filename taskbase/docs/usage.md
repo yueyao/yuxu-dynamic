@@ -9,8 +9,7 @@ Taskbase 的 Web 服务和 CLI 是两套独立客户端，文档分开维护。
 | 文档 | 内容 |
 | --- | --- |
 | [Yuxun Web 使用文档](web.md) | 登录、节目库、采集、任务、调度、转写稿阅读 |
-| [Yuxun CLI 使用文档](cli.md) | 安装、登录、任务、调度、产物、Mac 后台服务 |
-| [Yuxun Mac 服务](yuxun-mac-service.md) | Worker 配对、安装、日志、Provider、故障排查 |
+| [Yuxun CLI 使用文档](cli.md) | 安装、登录、任务、调度、产物、Worker |
 
 ## 设计与运维
 

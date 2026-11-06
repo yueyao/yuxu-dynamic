@@ -5,6 +5,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { envValue } from './env.ts';
 
 type Session = { server: string; token: string };
 
@@ -13,6 +14,11 @@ const MAX_INPUT_BYTES = 64 * 1024;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function configRoot(): string {
+  return resolve(envValue('YUXUN_CONFIG_DIR', 'TASKBASE_CONFIG_DIR',
+    join(homedir(), '.config', 'yuxun')) as string);
+}
+
+function legacyConfigRoot(): string {
   return resolve(process.env.TASKBASE_CONFIG_DIR ?? join(homedir(), '.config', 'taskbase'));
 }
 
@@ -21,13 +27,28 @@ function sessionPath(): string {
 }
 
 async function readSession(): Promise<Session | null> {
+  const parse = (raw: string): Session | null => {
+    try {
+      const value = JSON.parse(raw) as Session;
+      return typeof value.server === 'string' && typeof value.token === 'string' ? value : null;
+    } catch { return null; }
+  };
   try {
-    const value = JSON.parse(await readFile(sessionPath(), 'utf8')) as Session;
-    if (typeof value.server !== 'string' || typeof value.token !== 'string') return null;
-    return value;
-  } catch {
-    return null;
+    const value = parse(await readFile(sessionPath(), 'utf8'));
+    if (value) return value;
+  } catch {}
+  // 旧路径迁移：只读取，登录后写回 ~/.config/yuxun。
+  const legacy = join(legacyConfigRoot(), 'session.json');
+  if (resolve(legacy) !== resolve(sessionPath())) {
+    try {
+      const value = parse(await readFile(legacy, 'utf8'));
+      if (value) {
+        await writeSession(value).catch(() => {});
+        return value;
+      }
+    } catch {}
   }
+  return null;
 }
 
 async function writeSession(session: Session): Promise<void> {
@@ -54,7 +75,8 @@ function has(args: string[], name: string): boolean {
 
 async function resolveServer(explicit?: string): Promise<string> {
   if (explicit) return explicit.replace(/\/+$/, '');
-  if (process.env.TASKBASE_URL) return process.env.TASKBASE_URL.replace(/\/+$/, '');
+  const envServer = envValue('YUXUN_URL', 'TASKBASE_URL');
+  if (envServer) return envServer.replace(/\/+$/, '');
   const session = await readSession();
   if (session) return session.server;
   return DEFAULT_SERVER;
@@ -96,6 +118,7 @@ function print(value: unknown): void {
 }
 
 async function promptPassword(): Promise<string> {
+  if (process.env.YUXUN_PASSWORD) return process.env.YUXUN_PASSWORD;
   if (process.env.TASKBASE_PASSWORD) return process.env.TASKBASE_PASSWORD;
   if (!process.stdin.isTTY || !process.stdin.setRawMode) {
     throw new Error('非交互环境请设置 TASKBASE_PASSWORD');
@@ -203,10 +226,12 @@ function usage(): string {
   yuxun task retry <task-id>
   yuxun task history [--app <app-id>] [--task-key <key>] [--status <status>] [--schedule <schedule-id>] [--limit <1-100>] [--cursor <cursor>]
   yuxun artifact download <artifact-id> --out <path>
-  yuxun mac <pair|doctor|install|start|stop|status|logs|run|uninstall> [...]
+  yuxun worker <run|pair|doctor|install|start|stop|status|logs|uninstall> [...]
+  yuxun doctor
+  yuxun version
   yuxun transcribe <audio-url> [--title <text>] [--language <code>] [--episode-id <id>] [--show-id <id>] [--out <path>] [--no-wait] [--timeout <秒>]
 
-所有联网命令都可加 --server <URL>；未指定时依次使用 TASKBASE_URL、已登录服务器、${DEFAULT_SERVER}。`;
+所有联网命令都可加 --server <URL>；未指定时依次使用 YUXUN_URL / TASKBASE_URL、已登录服务器、${DEFAULT_SERVER}。`;
 }
 
 async function main(args = process.argv.slice(2)): Promise<void> {
@@ -221,7 +246,36 @@ async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (args[0] === 'version') {
+    const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8')) as { version?: string };
+    console.log(`yuxun ${pkg.version ?? 'unknown'}`);
+    console.log(`runtime: ${ROOT}`);
+    return;
+  }
+
+  if (args[0] === 'doctor') {
+    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'mac-agent.ts'), 'doctor'], {
+      stdio: 'inherit',
+    });
+    process.exitCode = result.status ?? 1;
+    return;
+  }
+
+  if (args[0] === 'worker') {
+    const command = args[1] ?? 'run';
+    if (command === 'run') {
+      const { runTranscriptionWorker } = await import('./transcription/worker.ts');
+      await runTranscriptionWorker();
+      return;
+    }
+    const result = spawnSync(process.execPath,
+      [join(ROOT, 'scripts', 'mac-agent.ts'), command, ...args.slice(2)], { stdio: 'inherit' });
+    process.exitCode = result.status ?? 1;
+    return;
+  }
+
   if (args[0] === 'mac') {
+    console.warn('yuxun mac 是兼容别名，请改用 yuxun worker');
     const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'mac-agent.ts'), ...args.slice(1)], {
       stdio: 'inherit',
     });
@@ -233,7 +287,8 @@ async function main(args = process.argv.slice(2)): Promise<void> {
 
   if (args[0] === 'login') {
     const server = await resolveServer(explicitServer);
-    const username = option(args, '--username') ?? process.env.TASKBASE_OWNER_USERNAME ?? 'owner';
+    const username = option(args, '--username')
+      ?? envValue('YUXUN_OWNER_USERNAME', 'TASKBASE_OWNER_USERNAME', 'owner') as string;
     const password = await promptPassword();
     const result = await request(server, '/v1/auth/login', { method: 'POST', body: { username, password } });
     const token = (result.data as { token: string }).token;

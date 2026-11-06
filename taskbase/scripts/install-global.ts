@@ -20,12 +20,12 @@ const BIN = resolve(process.env.YUXUN_BIN_DIR ?? join(homedir(), '.local', 'bin'
 async function copyRuntime(): Promise<void> {
   await rm(RUNTIME, { recursive: true, force: true });
   await mkdir(RUNTIME, { recursive: true, mode: 0o755 });
-  for (const entry of ['src', 'scripts', 'web', 'demo', 'deploy']) {
+  for (const entry of ['src', 'scripts']) {
     const source = join(ROOT, entry);
     if (!existsSync(source)) continue;
     await cp(source, join(RUNTIME, entry), { recursive: true });
   }
-  for (const file of ['package.json', 'package-lock.json', 'README.md']) {
+  for (const file of ['package.json', 'README.md']) {
     const source = join(ROOT, file);
     if (existsSync(source)) await cp(source, join(RUNTIME, file));
   }
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   const cli = await writeBin('yuxun', 'src/cli.ts');
   console.log(`运行时：${RUNTIME}`);
   console.log(`CLI：${cli}`);
-  console.log('下一步：yuxun mac doctor && yuxun mac install');
+  console.log('下一步：yuxun doctor && yuxun worker install');
 }
 
 main().catch((error) => {

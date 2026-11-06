@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.ts';
+import { envValue } from '../env.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { TRANSCRIPTION_APP_ID } from './manifest.ts';
 import { TranscriptionStore, type TranscriptSegment } from './store.ts';
@@ -259,23 +260,35 @@ export async function runTranscriptionOnce(client: WorkerClient, store: Transcri
   return true;
 }
 
-async function main(): Promise<void> {
-  const token = process.env.TASKBASE_WORKER_TOKEN;
-  if (!token) throw new Error('请设置 TASKBASE_WORKER_TOKEN');
+export type TranscriptionWorkerRunOptions = {
+  token?: string;
+  baseUrl?: string;
+  heartbeatMs?: number;
+  pollMs?: number;
+};
+
+export async function runTranscriptionWorker(overrides: TranscriptionWorkerRunOptions = {}): Promise<void> {
+  const token = overrides.token
+    ?? envValue('YUXUN_WORKER_TOKEN', 'TASKBASE_WORKER_TOKEN');
+  if (!token) throw new Error('请设置 YUXUN_WORKER_TOKEN（兼容 TASKBASE_WORKER_TOKEN）');
   const store = new TranscriptionStore(config.dbPath);
+  const baseUrl = overrides.baseUrl
+    ?? envValue('YUXUN_URL', 'TASKBASE_URL', 'http://127.0.0.1:3333') as string;
   const client = new WorkerClient({
-    baseUrl: process.env.TASKBASE_URL ?? 'http://127.0.0.1:3333',
+    baseUrl,
     token,
-    heartbeatMs: Number(process.env.TASKBASE_HEARTBEAT_MS ?? 15_000),
+    heartbeatMs: overrides.heartbeatMs
+      ?? Number(envValue('YUXUN_HEARTBEAT_MS', 'TASKBASE_HEARTBEAT_MS', '15000')),
   });
   const options: TranscriptionWorkerOptions = {
     dataDir: config.dataDir,
-    pollMs: Number(process.env.TASKBASE_POLL_MS ?? 2_000),
+    pollMs: overrides.pollMs
+      ?? Number(envValue('YUXUN_POLL_MS', 'TASKBASE_POLL_MS', '2000')),
   };
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort());
   process.on('SIGTERM', () => controller.abort());
-  console.log('Transcription Worker 已启动');
+  console.log(`Transcription Worker 已启动：${baseUrl}`);
   while (!controller.signal.aborted) {
     try {
       const worked = await runTranscriptionOnce(client, store, options);
@@ -290,5 +303,5 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+  await runTranscriptionWorker();
 }

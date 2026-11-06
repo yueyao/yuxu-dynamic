@@ -25,17 +25,28 @@ type AgentConfig = {
 };
 
 function agentDir(): string {
-  return resolve(process.env.TASKBASE_MAC_AGENT_DIR ?? join(homedir(), '.config', 'taskbase'));
+  return resolve(process.env.YUXUN_MAC_AGENT_DIR ?? process.env.TASKBASE_MAC_AGENT_DIR
+    ?? join(homedir(), '.config', 'yuxun'));
 }
-function envPath(): string { return join(agentDir(), 'mac-agent.env'); }
-function configPath(): string { return join(agentDir(), 'mac-agent.json'); }
+function envPath(): string { return join(agentDir(), 'worker.env'); }
+function configPath(): string { return join(agentDir(), 'worker.json'); }
+function legacyAgentDir(): string {
+  return resolve(process.env.TASKBASE_LEGACY_AGENT_DIR ?? join(homedir(), '.config', 'taskbase'));
+}
+function legacyEnvPath(): string { return join(legacyAgentDir(), 'mac-agent.env'); }
+function legacyConfigPath(): string { return join(legacyAgentDir(), 'mac-agent.json'); }
+function defaultDataDir(): string {
+  return join(homedir(), 'Library', 'Application Support', 'Yuxun');
+}
 function launchAgentsDir(): string {
-  return resolve(process.env.TASKBASE_LAUNCH_AGENTS_DIR ?? join(homedir(), 'Library', 'LaunchAgents'));
+  return resolve(process.env.YUXUN_LAUNCH_AGENTS_DIR ?? process.env.TASKBASE_LAUNCH_AGENTS_DIR
+    ?? join(homedir(), 'Library', 'LaunchAgents'));
 }
 function plistPath(): string { return join(launchAgentsDir(), `${LABEL}.plist`); }
 function legacyPlistPath(): string { return join(launchAgentsDir(), `${LEGACY_LABEL}.plist`); }
 function logPath(): string {
-  return resolve(process.env.TASKBASE_MAC_AGENT_LOG ?? join(homedir(), 'Library', 'Logs', 'yuxun-worker.log'));
+  return resolve(process.env.YUXUN_MAC_AGENT_LOG ?? process.env.TASKBASE_MAC_AGENT_LOG
+    ?? join(homedir(), 'Library', 'Logs', 'yuxun-worker.log'));
 }
 
 /** DSH/Electron 里 process.execPath 可能是 Helper；优先找真正的 node。 */
@@ -68,9 +79,38 @@ function xml(value: string): string {
     .replaceAll('"', '&quot;').replaceAll("'", '&apos;');
 }
 
+async function migrateLegacyFiles(): Promise<void> {
+  await mkdir(agentDir(), { recursive: true, mode: 0o700 });
+  await chmod(agentDir(), 0o700);
+  await mkdir(defaultDataDir(), { recursive: true, mode: 0o700 });
+  if (!existsSync(envPath()) && existsSync(legacyEnvPath())) {
+    const old = await readFile(legacyEnvPath(), 'utf8');
+    const mapped = old
+      .replace(/^TASKBASE_URL=/m, 'YUXUN_URL=')
+      .replace(/^TASKBASE_WORKER_TOKEN=/m, 'YUXUN_WORKER_TOKEN=')
+      .replace(/^TASKBASE_DATA_DIR=.*/m, `YUXUN_DATA_DIR=${defaultDataDir()}`)
+      .replace(/^TASKBASE_POLL_MS=/m, 'YUXUN_POLL_MS=')
+      .replace(/^TASKBASE_HEARTBEAT_MS=/m, 'YUXUN_HEARTBEAT_MS=');
+    await writeFile(envPath(), mapped, { mode: 0o600 });
+    await chmod(envPath(), 0o600);
+  }
+  if (!existsSync(configPath()) && existsSync(legacyConfigPath())) {
+    try {
+      const value = JSON.parse(await readFile(legacyConfigPath(), 'utf8')) as AgentConfig;
+      value.data_dir = defaultDataDir();
+      await writeFile(configPath(), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+      await chmod(configPath(), 0o600);
+    } catch {}
+  }
+}
+
 async function readConfig(): Promise<AgentConfig | null> {
   try {
     const value = JSON.parse(await readFile(configPath(), 'utf8')) as AgentConfig;
+    if (value.server && value.data_dir) return value;
+  } catch {}
+  try {
+    const value = JSON.parse(await readFile(legacyConfigPath(), 'utf8')) as AgentConfig;
     return value.server && value.data_dir ? value : null;
   } catch { return null; }
 }
@@ -121,22 +161,23 @@ function legacyServiceTarget(): string {
 
 function envFile(server: string, token: string, dataDir: string, model: string, provider: string): string {
   return [
-    `TASKBASE_URL=${server}`,
-    `TASKBASE_WORKER_TOKEN=${token}`,
-    `TASKBASE_DATA_DIR=${dataDir}`,
+    `YUXUN_URL=${server}`,
+    `YUXUN_WORKER_TOKEN=${token}`,
+    `YUXUN_DATA_DIR=${dataDir}`,
     `TRANSCRIPTION_PROVIDER=${provider}`,
     `TRANSCRIPTION_WHISPER_MODEL=${model}`,
     `TRANSCRIPTION_MODEL=${model}`,
-    'TASKBASE_POLL_MS=2000',
-    'TASKBASE_HEARTBEAT_MS=15000',
+    'YUXUN_POLL_MS=2000',
+    'YUXUN_HEARTBEAT_MS=15000',
     '',
   ].join('\n');
 }
 
 async function pair(args: string[]): Promise<void> {
+  await migrateLegacyFiles();
   const server = (option(args, '--server') ?? process.env.TASKBASE_URL ?? '').replace(/\/+$/, '');
-  const token = option(args, '--token') ?? process.env.TASKBASE_WORKER_TOKEN
-    ?? (existsSync(envPath()) ? (await readFile(envPath(), 'utf8')).match(/^TASKBASE_WORKER_TOKEN=(.*)$/m)?.[1] : undefined);
+  const token = option(args, '--token') ?? process.env.YUXUN_WORKER_TOKEN ?? process.env.TASKBASE_WORKER_TOKEN
+    ?? (existsSync(envPath()) ? (await readFile(envPath(), 'utf8')).match(/^(?:YUXUN_WORKER_TOKEN|TASKBASE_WORKER_TOKEN)=(.*)$/m)?.[1] : undefined);
   if (!server) throw new Error('缺少 --server，例如 http://43.156.253.152');
   if (!token) throw new Error('缺少 --token（Transcription Worker Token）');
   const parsed = new URL(server);
@@ -146,7 +187,7 @@ async function pair(args: string[]): Promise<void> {
   if (!['whisper', 'funasr', 'elevenlabs'].includes(provider)) {
     throw new Error('--provider 必须是 whisper、funasr 或 elevenlabs');
   }
-  const dataDir = resolve(option(args, '--data-dir') ?? join(homedir(), 'Library', 'Application Support', 'TaskbaseAgent'));
+  const dataDir = resolve(option(args, '--data-dir') ?? defaultDataDir());
   await mkdir(agentDir(), { recursive: true, mode: 0o700 });
   await chmod(agentDir(), 0o700);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
@@ -165,15 +206,16 @@ async function pair(args: string[]): Promise<void> {
   console.log(`Provider：${provider}/${model}`);
   console.log(`数据目录：${dataDir}`);
   console.log(`环境文件：${envPath()}`);
-  console.log('下一步：yuxun mac doctor && yuxun mac install');
+  console.log('下一步：yuxun worker doctor && yuxun worker install');
 }
 
 async function doctor(): Promise<void> {
+  await migrateLegacyFiles();
   const config = await readConfig();
   const checks: Array<[string, boolean, string]> = [];
   checks.push(['配置文件', Boolean(config), config ? configPath() : `缺少 ${configPath()}`]);
   const env = existsSync(envPath()) ? await readFile(envPath(), 'utf8') : '';
-  checks.push(['Worker Token', /^TASKBASE_WORKER_TOKEN=.+/m.test(env), envPath()]);
+  checks.push(['Worker Token', /^(?:YUXUN_WORKER_TOKEN|TASKBASE_WORKER_TOKEN)=.+/m.test(env), envPath()]);
   const ffmpeg = await quiet('ffmpeg', ['-version']);
   checks.push(['ffmpeg', ffmpeg.ok, ffmpeg.ok ? ffmpeg.output.split('\n')[0] : '未安装或不在 PATH']);
   const whisper = await quiet(process.env.TRANSCRIPTION_WHISPER_BIN ?? 'whisper', ['--help']);
@@ -187,14 +229,24 @@ async function doctor(): Promise<void> {
   if (checks.some(([, ok]) => !ok)) process.exitCode = 1;
 }
 
+async function waitServiceGone(timeoutMs = 6_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await launchctl(['print', serviceTarget()]);
+    if (!current.ok) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+  }
+}
+
 async function install(): Promise<void> {
+  await migrateLegacyFiles();
   const config = await readConfig();
-  if (!config) throw new Error('尚未配对，请先运行 yuxun mac pair');
+  if (!config) throw new Error('尚未配对，请先运行 yuxun worker pair');
   if (!existsSync(envPath())) throw new Error(`缺少环境文件 ${envPath()}`);
   await mkdir(launchAgentsDir(), { recursive: true });
   await mkdir(dirname(logPath()), { recursive: true });
-  const worker = join(ROOT, 'src', 'transcription', 'worker.ts');
-  if (!existsSync(worker)) throw new Error(`找不到 Worker：${worker}`);
+  const worker = join(ROOT, 'src', 'cli.ts');
+  if (!existsSync(worker)) throw new Error(`找不到 CLI：${worker}`);
   const pathValue = [
     dirname(nodeBinary()), '/usr/local/bin', '/opt/homebrew/bin',
     '/Library/Frameworks/Python.framework/Versions/3.13/bin', '/usr/bin', '/bin',
@@ -209,6 +261,8 @@ async function install(): Promise<void> {
     <string>${xml(nodeBinary())}</string>
     <string>--env-file=${xml(envPath())}</string>
     <string>${xml(worker)}</string>
+    <string>worker</string>
+    <string>run</string>
   </array>
   <key>WorkingDirectory</key><string>${xml(ROOT)}</string>
   <key>RunAtLoad</key><true/>
@@ -224,41 +278,42 @@ async function install(): Promise<void> {
 `;
   await writeFile(plistPath(), plist, { mode: 0o600 });
   await chmod(plistPath(), 0o600);
-  // 迁移旧名称的 后台服务，避免两个 Worker 同时运行。
+  // 迁移旧名称的后台服务，避免两个 Worker 同时运行。
   await launchctl(['bootout', legacyServiceTarget()]);
   await rm(legacyPlistPath(), { force: true });
   await launchctl(['bootout', serviceTarget()]);
-  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
-  let boot = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
-  if (!boot.ok) {
-    // launchd 有时在 bootout 后短暂拒绝 bootstrap；重试一次。
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1_000));
+  await waitServiceGone();
+  let boot = { ok: false, output: '' };
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     boot = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
+    if (boot.ok) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500 * (attempt + 1)));
   }
   if (!boot.ok) throw new Error(`launchctl bootstrap 失败：${boot.output}`);
   await launchctl(['kickstart', '-k', serviceTarget()]);
   console.log(`Yuxun 后台服务已安装：${plistPath()}`);
   console.log(`日志：${logPath()}`);
-  console.log('状态：yuxun mac status');
+  console.log('状态：yuxun worker status');
 }
 
 async function start(): Promise<void> {
-  if (!existsSync(plistPath())) throw new Error('尚未安装 Yuxun 后台服务，请先运行 yuxun mac install');
+  if (!existsSync(plistPath())) throw new Error('尚未安装 Yuxun 后台服务，请先运行 yuxun worker install');
   const result = await launchctl(['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath()]);
   if (!result.ok && !result.output.includes('already bootstrapped')) {
     throw new Error(result.output || 'launchctl bootstrap 失败');
   }
   await launchctl(['kickstart', '-k', serviceTarget()]);
-  console.log('Yuxun Mac 服务已启动');
+  console.log('Yuxun Worker 服务已启动');
 }
 
 async function stop(): Promise<void> {
   const result = await launchctl(['bootout', serviceTarget()]);
-  console.log(result.ok ? 'Yuxun Mac 服务已停止' : `停止失败：${result.output}`);
+  console.log(result.ok ? 'Yuxun Worker 服务已停止' : `停止失败：${result.output}`);
   if (!result.ok) process.exitCode = 1;
 }
 
 async function status(): Promise<void> {
+  await migrateLegacyFiles();
   const config = await readConfig();
   console.log(`服务端：${config?.server ?? '未配对'}`);
   console.log(`Provider：${config?.provider ?? '未设置'}/${config?.model ?? '未设置'}`);
@@ -281,10 +336,11 @@ async function logs(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  if (!existsSync(envPath())) throw new Error('尚未配对，请先运行 yuxun mac pair');
-  const worker = join(ROOT, 'src', 'transcription', 'worker.ts');
+  await migrateLegacyFiles();
+  if (!existsSync(envPath())) throw new Error('尚未配对，请先运行 yuxun worker pair');
+  const worker = join(ROOT, 'src', 'cli.ts');
   await new Promise<void>((done, reject) => {
-    const child = spawn(nodeBinary(), [`--env-file=${envPath()}`, worker], { cwd: ROOT, stdio: 'inherit' });
+    const child = spawn(nodeBinary(), [`--env-file=${envPath()}`, worker, 'worker', 'run'], { cwd: ROOT, stdio: 'inherit' });
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? done() : reject(new Error(`Worker 退出码 ${code}`)));
   });
@@ -304,12 +360,12 @@ async function uninstall(args: string[]): Promise<void> {
 
 function usage(): string {
   return `用法:
-  yuxun mac pair --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
-  yuxun mac doctor
-  yuxun mac install
-  yuxun mac start | stop | status | logs
-  yuxun mac run
-  yuxun mac uninstall [--purge]
+  yuxun worker pair --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
+  yuxun worker doctor
+  yuxun worker install
+  yuxun worker start | stop | status | logs
+  yuxun worker run
+  yuxun worker uninstall [--purge]
 
 说明：
   - 本工具只控制 Mac 上的 Transcription Worker；任务仍在远端 Platform。
