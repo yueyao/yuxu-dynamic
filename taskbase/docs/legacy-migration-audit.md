@@ -32,8 +32,8 @@
 
 | 旧逻辑 | 状态 | 影响 |
 | --- | --- | --- |
-| `apps/podcast-tools` FunASR / ElevenLabs Provider | 未迁移 | 新版本只有 Whisper CLI |
-| 安全下载 `safe-http.ts`、DNS/IP 校验 | 未迁移 | 新 Worker 只有基础 URL/协议校验 |
+| `apps/podcast-tools` FunASR / ElevenLabs Provider | **已迁移契约** | 新增 `providers.ts`；仍需真实服务/Key 验收 |
+| 安全下载 `safe-http.ts`、DNS/IP 校验 | **已迁移** | 新增 `safe-http.ts`；默认 HTTPS/公网，测试可显式放开 |
 | 音频切片、逐片检查点、恢复 | 未迁移 | 新版本整段转写，长音频恢复较弱 |
 | `apps/time-worker` / `time-cli` 时间查询 | 未迁移 | 旧验收用例 |
 | CLI npm 包、发布工作流、`scripts/build-cli` | 未迁移 | 新 CLI 是源码运行 |
@@ -44,8 +44,8 @@
 
 只有满足以下条件后，才建议删除旧逻辑：
 
-1. FunASR/ElevenLabs Provider 或明确的替代 Provider 合并进 `taskbase/src/transcription/`；
-2. `safe-http` 的 SSRF/重定向/大小限制合并，或确认不再接受任意外部音频 URL；
+1. ~~FunASR/ElevenLabs Provider 合并~~（已完成契约与 mock 测试，待真实服务验收）；
+2. ~~`safe-http` 的 SSRF/重定向/大小限制合并~~（已完成）；
 3. 长音频切片与检查点迁移，或确认只支持单段音频；
 4. 时间查询/CLI 发布等旧能力确认废弃，或迁移到新的 app；
 5. 全量测试通过，包括旧仓库对应的验收用例。

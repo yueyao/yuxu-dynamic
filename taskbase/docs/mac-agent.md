@@ -36,10 +36,12 @@ cd taskbase
 
 npm run mac:pair -- \
   --server 'http://43.156.253.152' \
-  --token '<Transcription Worker Token>'
+  --token '<Transcription Worker Token>' \
+  --provider whisper \
+  --model small
 ```
 
-配对会写入：
+可选 `--provider whisper|funasr|elevenlabs`。配对会写入：
 
 - `~/.config/taskbase/mac-agent.env`（600，包含 Worker Token）
 - `~/.config/taskbase/mac-agent.json`（600，不含 Token）
@@ -47,8 +49,26 @@ npm run mac:pair -- \
 可选参数：
 
 ```sh
+--provider whisper
 --model small
 --data-dir "$HOME/Library/Application Support/TaskbaseAgent"
+```
+
+FunASR / ElevenLabs 需要额外编辑 `~/.config/taskbase/mac-agent.env`：
+
+```sh
+TRANSCRIPTION_PROVIDER=funasr
+FUNASR_BASE_URL=http://127.0.0.1:8000
+FUNASR_API_TOKEN=...
+TRANSCRIPTION_MODEL=sensevoice
+```
+
+或：
+
+```sh
+TRANSCRIPTION_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=...
+TRANSCRIPTION_MODEL=scribe_v2
 ```
 
 ## 3. 检查
@@ -136,6 +156,9 @@ npm run mac:logs
 常见问题：
 
 - `whisper` 不在 PATH：设置 `TRANSCRIPTION_WHISPER_BIN`，或安装到 `/usr/local/bin`、`/opt/homebrew/bin`
+- 本地 HTTP 测试被拒绝：设置 `TRANSCRIPTION_ALLOW_INSECURE_HTTP=1`（仅测试，生产不要开启）
+- FunASR 连接失败：检查 `FUNASR_BASE_URL` 和 `FUNASR_API_TOKEN`
+- ElevenLabs 401：检查 `ELEVENLABS_API_KEY`
 - `ffmpeg` 不在 PATH：安装 ffmpeg，或在 LaunchAgent 的 PATH 中包含其目录
 - 401/403：Worker Token 不正确或已轮换
 - 服务端 404：远端地址应指向 Web/nginx 入口，Agent 会尝试 `/health` 和 `/api/health`

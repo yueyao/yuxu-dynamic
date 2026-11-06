@@ -16,6 +16,7 @@ const DEFAULT_MODEL = 'small';
 
 type AgentConfig = {
   server: string;
+  provider: string;
   model: string;
   data_dir: string;
   installed_at: string;
@@ -113,12 +114,14 @@ function serviceTarget(): string {
   return `gui/${process.getuid?.() ?? 501}/${LABEL}`;
 }
 
-function envFile(server: string, token: string, dataDir: string, model: string): string {
+function envFile(server: string, token: string, dataDir: string, model: string, provider: string): string {
   return [
     `TASKBASE_URL=${server}`,
     `TASKBASE_WORKER_TOKEN=${token}`,
     `TASKBASE_DATA_DIR=${dataDir}`,
+    `TRANSCRIPTION_PROVIDER=${provider}`,
     `TRANSCRIPTION_WHISPER_MODEL=${model}`,
+    `TRANSCRIPTION_MODEL=${model}`,
     'TASKBASE_POLL_MS=2000',
     'TASKBASE_HEARTBEAT_MS=15000',
     '',
@@ -134,14 +137,18 @@ async function pair(args: string[]): Promise<void> {
   const parsed = new URL(server);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('--server 必须是 http(s)');
   const model = option(args, '--model') ?? process.env.TRANSCRIPTION_WHISPER_MODEL ?? DEFAULT_MODEL;
+  const provider = (option(args, '--provider') ?? process.env.TRANSCRIPTION_PROVIDER ?? 'whisper').trim().toLowerCase();
+  if (!['whisper', 'funasr', 'elevenlabs'].includes(provider)) {
+    throw new Error('--provider 必须是 whisper、funasr 或 elevenlabs');
+  }
   const dataDir = resolve(option(args, '--data-dir') ?? join(homedir(), 'Library', 'Application Support', 'TaskbaseAgent'));
   await mkdir(agentDir(), { recursive: true, mode: 0o700 });
   await chmod(agentDir(), 0o700);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  await writeFile(envPath(), envFile(server, token, dataDir, model), { mode: 0o600 });
+  await writeFile(envPath(), envFile(server, token, dataDir, model, provider), { mode: 0o600 });
   await chmod(envPath(), 0o600);
   const config: AgentConfig = {
-    server, model, data_dir: dataDir,
+    server, provider, model, data_dir: dataDir,
     installed_at: new Date().toISOString(),
     node: nodeBinary(),
   };
@@ -150,7 +157,7 @@ async function pair(args: string[]): Promise<void> {
   const result = await health(server);
   console.log(`已配对：${server}`);
   console.log(`服务端健康：${result.ok ? '正常' : `失败（${result.detail}）`}`);
-  console.log(`模型：whisper/${model}`);
+  console.log(`Provider：${provider}/${model}`);
   console.log(`数据目录：${dataDir}`);
   console.log(`环境文件：${envPath()}`);
   console.log('下一步：npm run mac:doctor && npm run mac:install');
@@ -240,7 +247,7 @@ async function stop(): Promise<void> {
 async function status(): Promise<void> {
   const config = await readConfig();
   console.log(`服务端：${config?.server ?? '未配对'}`);
-  console.log(`模型：${config?.model ?? '未设置'}`);
+  console.log(`Provider：${config?.provider ?? '未设置'}/${config?.model ?? '未设置'}`);
   console.log(`环境：${envPath()}`);
   console.log(`LaunchAgent：${plistPath()}`);
   const result = await launchctl(['print', serviceTarget()]);
@@ -281,7 +288,7 @@ async function uninstall(args: string[]): Promise<void> {
 
 function usage(): string {
   return `用法:
-  npm run mac:pair -- --server <URL> --token <Worker Token> [--model small] [--data-dir <path>]
+  npm run mac:pair -- --server <URL> --token <Worker Token> [--provider whisper|funasr|elevenlabs] [--model small] [--data-dir <path>]
   npm run mac:doctor
   npm run mac:install
   npm run mac:start | mac:stop | mac:status | mac:logs

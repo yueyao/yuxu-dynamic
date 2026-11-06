@@ -1,25 +1,23 @@
 #!/usr/bin/env node
 /** 转写 Worker：下载公开音频 → ffmpeg 标准化 → 本地 ASR → 保存转写稿并上传远端产物。 */
 import { spawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { TRANSCRIPTION_APP_ID } from './manifest.ts';
 import { TranscriptionStore, type TranscriptSegment } from './store.ts';
-import { WhisperCliProvider, type AsrProvider } from './asr.ts';
+import type { AsrProvider } from './asr.ts';
+import { createAsrProvider } from './providers.ts';
+import { SafeHttpClient } from './safe-http.ts';
 
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 
 export type TranscriptionWorkerOptions = {
   dataDir?: string;
   asrProvider?: AsrProvider;
-  fetchImpl?: typeof fetch;
   pollMs?: number;
 };
 
@@ -48,30 +46,15 @@ function input(value: unknown): TaskInput {
   };
 }
 
-async function download(url: string, destination: string, fetchImpl: typeof fetch): Promise<void> {
-  const parsed = new URL(url);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('音频 URL 必须是 http(s)');
-  const response = await fetchImpl(url, {
-    headers: { 'user-agent': 'Mozilla/5.0 Taskbase/0.2' },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(30 * 60 * 1000),
+async function download(url: string, destination: string): Promise<void> {
+  const client = new SafeHttpClient({}, {
+    allowInsecure: process.env.TRANSCRIPTION_ALLOW_INSECURE_HTTP === '1',
   });
-  if (!response.ok) throw new Error(`音频下载失败：HTTP ${response.status}`);
-  const length = Number(response.headers.get('content-length') ?? '0');
-  if (Number.isFinite(length) && length > MAX_AUDIO_BYTES) throw new Error('音频超过 500 MiB 限制');
-  if (!response.body) throw new Error('音频响应为空');
-  let bytes = 0;
-  const counter = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      bytes += chunk.byteLength;
-      if (bytes > MAX_AUDIO_BYTES) {
-        controller.error(new Error('音频超过 500 MiB 限制'));
-        return;
-      }
-      controller.enqueue(chunk);
-    },
+  await client.download(url, destination, {
+    maxBytes: MAX_AUDIO_BYTES,
+    timeoutMs: 30 * 60 * 1000,
+    headers: { 'user-agent': 'Mozilla/5.0 Taskbase/0.3' },
   });
-  await pipeline(Readable.fromWeb(response.body.pipeThrough(counter) as never), createWriteStream(destination, { mode: 0o600 }));
 }
 
 function runFfmpeg(inputPath: string, outputPath: string): Promise<void> {
@@ -127,15 +110,14 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
     throw new Error('不是转写应用的任务');
   }
   const task = input(lease.input);
-  const provider = options.asrProvider ?? new WhisperCliProvider();
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const provider = options.asrProvider ?? createAsrProvider();
   const workDir = await mkdtemp(join(tmpdir(), 'taskbase-transcribe-'));
   try {
     await client.withHeartbeat(lease, async (active) => {
       await active.log(lease, 'info', `开始转写：${task.title ?? task.audio_url}`);
       await active.progress(lease, 5, '下载音频');
       const downloaded = join(workDir, 'source');
-      await download(task.audio_url, downloaded, fetchImpl);
+      await download(task.audio_url, downloaded);
 
       await active.progress(lease, 20, '转换为 16k 单声道 WAV');
       const wav = join(workDir, 'audio.wav');
