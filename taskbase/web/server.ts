@@ -284,36 +284,6 @@ export function createWebServer(options: WebServerOptions): Server {
     return true;
   }
 
-  async function importSuccessfulTranscripts(token: string, maxTasks = 500): Promise<number> {
-    let imported = 0;
-    let scanned = 0;
-    let cursor: string | undefined;
-    while (scanned < maxTasks) {
-      const query = new URLSearchParams({
-        app_id: 'transcription-tools', status: 'succeeded', limit: '100',
-      });
-      if (cursor) query.set('cursor', cursor);
-      const data = await platformJson<{
-        tasks: Array<{ task_id: string; input?: { episode_id?: string; show_id?: string; title?: string } | null }>;
-        next_cursor?: string | null;
-      }>(`/v1/tasks?${query}`, { token });
-      for (const task of data.tasks ?? []) {
-        scanned += 1;
-        const episodeId = task.input?.episode_id;
-        if (!episodeId || transcriptionStore.getByTask(task.task_id)) continue;
-        const saved = await saveTranscriptFromTask(task.task_id, {
-          id: episodeId,
-          show_id: task.input?.show_id ?? '',
-          title: task.input?.title ?? '',
-        }, token);
-        if (saved) imported += 1;
-      }
-      cursor = data.next_cursor ?? undefined;
-      if (!cursor || (data.tasks ?? []).length === 0) break;
-    }
-    return imported;
-  }
-
   async function proxyPlatform(request: IncomingMessage, response: ServerResponse, session: Session,
     suffix: string, search: string): Promise<void> {
     const path = `/v1${suffix}${search}`;
@@ -530,11 +500,6 @@ export function createWebServer(options: WebServerOptions): Server {
           created_at: transcript.created_at,
         })),
       });
-    }
-
-    if (method === 'POST' && path === '/api/transcription/transcripts/import') {
-      const imported = await importSuccessfulTranscripts(session.token);
-      return sendJson(response, 200, { ok: true, imported });
     }
 
     const itemMatch = path.match(/^\/api\/transcription\/queue\/([^/]+)$/);

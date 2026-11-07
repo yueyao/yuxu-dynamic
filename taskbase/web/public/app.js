@@ -1161,20 +1161,11 @@
       el('div', { class: 'card-head' },
         el('div', {}, el('div', { class: 'card-title' }, '已入库转写稿'),
           el('div', { class: 'card-sub' }, '转写成功并写入服务端数据库的结果')),
-        el('div', { class: 'toolbar' },
-          actionButton('同步已有转写', 'refresh', async () => {
-            try {
-              const result = await transcription('/transcripts/import', { method: 'POST' });
-              toast(`导入 ${result.imported} 条转写稿`, 'success');
-              await renderTranscribeQueue();
-            } catch (error) {
-              toast(error.message, 'error');
-            }
-          }, 'btn btn-sm'))),
+        null),
       el('div', { class: 'card-body flush' },
         transcripts.length
           ? table(['单集', '节目', '时长', '片段', '引擎', '完成时间', '操作'], transcriptRows)
-          : emptyState('还没有入库的转写稿', '队列完成一集，或点击「同步已有转写」导入历史结果。', 'tasks'))));
+          : emptyState('还没有入库的转写稿', '队列完成一集后会自动写入这里。', 'tasks'))));
   }
 
   function openAddShow() {
@@ -1340,10 +1331,12 @@
       toast('该单集没有音频地址', 'error');
       return;
     }
-    const result = await podcast(`/episodes/${encodeURIComponent(episode.episode_id)}/transcribe`, {
-      method: 'POST', body: { language: 'zh' },
+    const result = await transcription('/queue', {
+      method: 'POST', body: { episode_ids: [episode.episode_id] },
     });
-    toast(`已提交转写任务 ${shortId(result.task?.task_id)}`, 'success');
+    await transcription('/queue/start', { method: 'POST' });
+    toast(`已加入转写队列${result.added ? '并开始' : '（已存在）'}`, 'success');
+    if (state.route === 'transcribe-queue') await renderTranscribeQueue();
   }
 
   function appendInline(parent, text) {

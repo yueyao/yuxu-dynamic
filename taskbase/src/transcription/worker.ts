@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-/** 转写 Worker：下载公开音频 → ffmpeg 标准化 → 本地 ASR → 保存转写稿并上传远端产物。 */
+/** 转写 Worker：下载公开音频 → ffmpeg 标准化 → 本地 ASR → 交付结果与产物到服务端。 */
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { config } from '../config.ts';
 import { envValue } from '../env.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { TRANSCRIPTION_APP_ID } from './manifest.ts';
-import { TranscriptionStore, type TranscriptSegment } from './store.ts';
+import type { TranscriptSegment } from './store.ts';
 import type { AsrProvider, AsrResult } from './asr.ts';
 import { createAsrProvider } from './providers.ts';
 import { SafeHttpClient } from './safe-http.ts';
@@ -17,7 +17,6 @@ import { SafeHttpClient } from './safe-http.ts';
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 
 export type TranscriptionWorkerOptions = {
-  dataDir?: string;
   asrProvider?: AsrProvider;
   pollMs?: number;
   chunkSeconds?: number;
@@ -173,7 +172,7 @@ function markdown(task: TaskInput, provider: AsrProvider, result: {
 }
 
 export async function executeTranscriptionLease(client: WorkerClient, lease: WorkerLease,
-  store: TranscriptionStore, options: TranscriptionWorkerOptions = {}): Promise<void> {
+  options: TranscriptionWorkerOptions = {}): Promise<void> {
   if (lease.app_id !== TRANSCRIPTION_APP_ID || lease.task_key !== 'episode/transcribe') {
     throw new Error('不是转写应用的任务');
   }
@@ -213,22 +212,9 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
       await active.progress(lease, 88, '生成文字稿');
       const artifact = Buffer.from(markdown(task, provider, result), 'utf8');
       const artifactId = await active.uploadArtifact(lease, 'transcript.md', artifact, 'text/markdown; charset=utf-8');
-      const transcript = store.save({
-        taskId: lease.task_id,
-        episodeId: task.episode_id ?? null,
-        showId: task.show_id ?? null,
-        title: task.title ?? null,
-        language: result.language,
-        provider: result.provider,
-        model: result.model,
-        durationSeconds: result.durationSeconds,
-        text: result.text,
-        segments: result.segments,
-        artifactId,
-      });
       await active.progress(lease, 95, '上传完成');
       await active.complete(lease, {
-        transcript_id: transcript.transcript_id,
+        transcript_id: `transcript-${randomUUID()}`,
         artifact_id: artifactId,
         segments: result.segments,
         language: result.language,
@@ -243,12 +229,12 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
   }
 }
 
-export async function runTranscriptionOnce(client: WorkerClient, store: TranscriptionStore,
+export async function runTranscriptionOnce(client: WorkerClient,
   options: TranscriptionWorkerOptions = {}): Promise<boolean> {
   const lease = await client.lease();
   if (!lease) return false;
   try {
-    await executeTranscriptionLease(client, lease, store, options);
+    await executeTranscriptionLease(client, lease, options);
   } catch (error) {
     const stale = error instanceof RemoteError && error.code === 'STALE_ATTEMPT';
     if (!stale) {
@@ -271,7 +257,6 @@ export async function runTranscriptionWorker(overrides: TranscriptionWorkerRunOp
   const token = overrides.token
     ?? envValue('YUXUN_WORKER_TOKEN', 'TASKBASE_WORKER_TOKEN');
   if (!token) throw new Error('请设置 YUXUN_WORKER_TOKEN（兼容 TASKBASE_WORKER_TOKEN）');
-  const store = new TranscriptionStore(config.dbPath);
   const baseUrl = overrides.baseUrl
     ?? envValue('YUXUN_URL', 'TASKBASE_URL', 'http://127.0.0.1:3333') as string;
   const client = new WorkerClient({
@@ -281,7 +266,6 @@ export async function runTranscriptionWorker(overrides: TranscriptionWorkerRunOp
       ?? Number(envValue('YUXUN_HEARTBEAT_MS', 'TASKBASE_HEARTBEAT_MS', '15000')),
   });
   const options: TranscriptionWorkerOptions = {
-    dataDir: config.dataDir,
     pollMs: overrides.pollMs
       ?? Number(envValue('YUXUN_POLL_MS', 'TASKBASE_POLL_MS', '2000')),
   };
@@ -291,7 +275,7 @@ export async function runTranscriptionWorker(overrides: TranscriptionWorkerRunOp
   console.log(`Transcription Worker 已启动：${baseUrl}`);
   while (!controller.signal.aborted) {
     try {
-      const worked = await runTranscriptionOnce(client, store, options);
+      const worked = await runTranscriptionOnce(client, options);
       if (!worked) await sleep(options.pollMs ?? 2_000, controller.signal);
     } catch (error) {
       if (controller.signal.aborted) break;
@@ -299,7 +283,6 @@ export async function runTranscriptionWorker(overrides: TranscriptionWorkerRunOp
       await sleep(3_000, controller.signal).catch(() => {});
     }
   }
-  store.close();
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

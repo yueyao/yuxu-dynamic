@@ -307,7 +307,7 @@ yuxun worker uninstall
 | --- | --- |
 | Worker 环境 | `~/.config/yuxun/worker.env` |
 | Worker 配置 | `~/.config/yuxun/worker.json` |
-| 数据 | `~/Library/Application Support/Yuxun` |
+| 临时数据目录 | `~/Library/Application Support/Yuxun`（不保存转写数据库） |
 | 后台服务 | `~/Library/LaunchAgents/com.yuxun.worker.plist` |
 | 日志 | `~/Library/Logs/yuxun-worker.log` |
 
@@ -348,7 +348,7 @@ Token 一旦轮换，需要重新执行 `yuxun worker pair`。
 | `YUXUN_PASSWORD` / `TASKBASE_PASSWORD` | 非交互登录密码 |
 | `YUXUN_CONFIG_DIR` | CLI 配置目录 |
 | `YUXUN_WORKER_TOKEN` | Transcription Worker Token |
-| `YUXUN_DATA_DIR` | Worker 本地数据目录 |
+| `YUXUN_DATA_DIR` | Worker 临时数据目录；转写结果不落本地 |
 | `YUXUN_POLL_MS` | Worker 轮询间隔 |
 | `YUXUN_HEARTBEAT_MS` | Worker 心跳间隔 |
 

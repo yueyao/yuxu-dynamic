@@ -269,7 +269,7 @@ sequenceDiagram
     P->>Q: 校验 output schema，标记 succeeded + event
 
     U->>W: 打开 /#/transcript/:episode
-    W->>Q: 本地 transcription_transcripts 或 task output fallback
+    W->>Q: 服务端 transcription_transcripts 或 task output fallback
     Q-->>W: transcript
     W-->>U: transcript JSON
     U->>U: 渲染 Markdown 阅读页（不下载）
@@ -283,19 +283,20 @@ sequenceDiagram
 - 重试 → 新任务，记录 `retry_of_task_id`
 
 ```text
-Web 单集 → “转写”
-  → 平台创建 transcription-tools/episode/transcribe
+Web 转写队列 → “开始”
+  → 服务端按顺序创建 transcription-tools/episode/transcribe
   → Transcription Worker 领取
   → 下载音频 → ffmpeg 16k mono → Whisper CLI → segments
-  → 写 transcription_transcripts
   → 生成 transcript.md → 上传平台产物
   → complete
-  → Web 转写稿查看/下载
+  → Web 写入服务端 transcription_transcripts
+  → 转写稿查看/下载
 ```
 
 - 默认 `whisper` CLI + `small` 模型；可用 `TRANSCRIPTION_WHISPER_MODEL` 改 `medium`。
-- 产物是 Markdown；文字稿同时写本地 `transcription_transcripts`。
-- 远端 Web 与 Worker 不在同一台机器时，Web 可从任务输出恢复文字稿（任务输出包含 `text`/`segments`/`artifact_id`）。
+- 产物是 Markdown；Worker 不写本地数据库，临时音频和中间文件用完即删。
+- 服务端是唯一数据源：任务队列、转写稿、产物都以服务端为准。
+- 远端 Web 与 Worker 不在同一台机器时，Web 从服务端任务输出恢复文字稿（包含 `text`/`segments`/`artifact_id`）。
 - 临时音频默认删除；音频下载上限 500 MiB；执行超时 6 小时。
 
 ## 10. 调度流程
