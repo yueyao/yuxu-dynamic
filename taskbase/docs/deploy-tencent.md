@@ -62,6 +62,7 @@ nginx 仍是原服务，新增：
 - 用户名：`owner`
 - 密码：`taskbase/.deploy/tencent-owner-password`（本机文件，600）
 - 转写 Worker Token：`taskbase/.deploy/transcription-worker-token`（本机文件，600）
+- Web 自动推进队列需要 Owner 凭据：`/etc/taskbase/web.env` 中的 `TASKBASE_OWNER_USERNAME` / `TASKBASE_OWNER_PASSWORD`（与 `api.env` 相同）
 - 转写稿对外 API Token：`taskbase/.deploy/transcript-api-token`（本机文件，600）
 
 不要把 `.deploy/` 提交到 Git；`.gitignore` 已忽略。

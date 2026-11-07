@@ -28,6 +28,8 @@ export type WebServerOptions = {
   cookieSecure?: boolean;
   fetchImpl?: typeof fetch;
   transcriptApiToken?: string;
+  platformOwnerUsername?: string;
+  platformOwnerPassword?: string;
   requestLog?: (record: Record<string, unknown>) => void;
 };
 
@@ -162,8 +164,12 @@ export function createWebServer(options: WebServerOptions): Server {
   const transcriptionQueue = new TranscriptionQueueStore(options.dbPath);
   const transcriptApiToken = options.transcriptApiToken
     ?? process.env.TASKBASE_TRANSCRIPT_API_TOKEN ?? '';
-  let queueRunnerToken: string | null = null;
+  let serviceToken: string | null = null;
   let queueTicking = false;
+  const ownerUsername = options.platformOwnerUsername
+    ?? process.env.TASKBASE_OWNER_USERNAME ?? 'owner';
+  const ownerPassword = options.platformOwnerPassword
+    ?? process.env.TASKBASE_OWNER_PASSWORD ?? '';
   const sessions = new Map<string, Session>();
   const loginAttempts = new Map<string, LoginAttempt>();
 
@@ -224,7 +230,7 @@ export function createWebServer(options: WebServerOptions): Server {
         counts: transcriptionQueue.counts(),
         paused: transcriptionQueue.getState('paused') === '1',
         error: transcriptionQueue.getState('error'),
-        runner: queueRunnerToken !== null,
+        runner: transcriptionQueue.getState('active') === '1',
         items: transcriptionQueue.list().map((item) => ({
           ...item,
           show_title: titles.get(item.show_id) ?? null,
@@ -298,28 +304,49 @@ export function createWebServer(options: WebServerOptions): Server {
     }
   }
 
+  async function servicePlatformToken(): Promise<string | null> {
+    if (serviceToken) return serviceToken;
+    if (!ownerPassword) return null;
+    try {
+      const result = await platformJson<{ token: string }>('/v1/auth/login', {
+        method: 'POST', body: { username: ownerUsername, password: ownerPassword },
+      });
+      serviceToken = result.token;
+      return serviceToken;
+    } catch {
+      return null;
+    }
+  }
+
   async function queueTick(): Promise<void> {
-    if (queueTicking || !queueRunnerToken) return;
+    if (queueTicking) return;
     queueTicking = true;
     try {
+      const token = await servicePlatformToken();
+      if (!token) {
+        transcriptionQueue.setState('paused', '1');
+        transcriptionQueue.setState('error', '服务端未配置 Owner 密码，队列无法自动推进');
+        return;
+      }
       const running = transcriptionQueue.running();
       if (running?.task_id) {
         let task: { status: string; progress?: number; error?: string | null; close_reason?: string | null };
         try {
           task = await platformJson(`/v1/tasks/${encodeURIComponent(running.task_id)}`,
-            { token: queueRunnerToken });
+            { token });
         } catch (error) {
           if (error instanceof WebError && error.status === 401) {
-            queueRunnerToken = null;
+            serviceToken = null;
+            transcriptionQueue.setState('active', '0');
             transcriptionQueue.setState('paused', '1');
-            transcriptionQueue.setState('error', 'Web 登录已失效，请重新登录后点击开始');
+            transcriptionQueue.setState('error', '平台登录已失效，请检查 Owner 密码');
           }
           return;
         }
         transcriptionQueue.updateProgress(running.id, task.progress ?? 0);
         if (task.status === 'succeeded') {
           try {
-            await saveTranscriptFromTask(running.task_id, running, queueRunnerToken);
+            await saveTranscriptFromTask(running.task_id, running, token);
           } catch (error) {
             console.error('保存转写稿失败', error);
           }
@@ -331,7 +358,7 @@ export function createWebServer(options: WebServerOptions): Server {
         } else if (task.status === 'queued' && running.started_at
           && Date.now() - running.started_at > 10 * 60 * 1000) {
           await platformJson(`/v1/tasks/${encodeURIComponent(running.task_id)}/close`, {
-            method: 'POST', token: queueRunnerToken, body: { reason: 'worker offline' },
+            method: 'POST', token, body: { reason: 'worker offline' },
           }).catch(() => {});
           transcriptionQueue.markFailed(running.id, 'Worker 10 分钟内未领取，队列已暂停');
           transcriptionQueue.setState('paused', '1');
@@ -340,11 +367,12 @@ export function createWebServer(options: WebServerOptions): Server {
         return;
       }
 
-      if (transcriptionQueue.getState('paused') === '1') return;
+      if (transcriptionQueue.getState('active') !== '1'
+        || transcriptionQueue.getState('paused') === '1') return;
       const next = transcriptionQueue.next();
       if (!next) return;
       try {
-        const created = await platformCreateTask(queueRunnerToken,
+        const created = await platformCreateTask(token,
           `${TRANSCRIPTION_APP_ID}/episode/transcribe`, {
             audio_url: next.audio_url,
             episode_id: next.id,
@@ -554,7 +582,7 @@ export function createWebServer(options: WebServerOptions): Server {
         counts: transcriptionQueue.counts(),
         paused: transcriptionQueue.getState('paused') === '1',
         error: transcriptionQueue.getState('error'),
-        runner: queueRunnerToken !== null,
+        runner: transcriptionQueue.getState('active') === '1',
       });
     }
 
@@ -578,7 +606,7 @@ export function createWebServer(options: WebServerOptions): Server {
     }
 
     if (method === 'POST' && path === '/api/transcription/queue/start') {
-      queueRunnerToken = session.token;
+      transcriptionQueue.setState('active', '1');
       transcriptionQueue.setState('paused', '0');
       transcriptionQueue.setState('error', null);
       void queueTick();
@@ -586,6 +614,7 @@ export function createWebServer(options: WebServerOptions): Server {
     }
 
     if (method === 'POST' && path === '/api/transcription/queue/pause') {
+      transcriptionQueue.setState('active', '0');
       transcriptionQueue.setState('paused', '1');
       return sendJson(response, 200, { ok: true, paused: true });
     }
@@ -851,6 +880,12 @@ export function createWebServer(options: WebServerOptions): Server {
     }
 
     throw new WebError(404, 'NOT_FOUND', '播客接口不存在');
+  }
+
+  const resumeActive = transcriptionQueue.getState('active') === '1';
+  const hadRunning = transcriptionQueue.running() !== null;
+  if (resumeActive || hadRunning) {
+    setTimeout(() => { void queueTick(); }, 1000).unref();
   }
 
   const cleanup = setInterval(() => {
