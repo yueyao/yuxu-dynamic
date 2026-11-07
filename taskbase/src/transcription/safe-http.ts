@@ -205,8 +205,17 @@ async function resolvePublicAddresses(hostname: string): Promise<ResolvedAddress
 function requestPinnedAddress(url: URL, address: ResolvedAddress, timeoutMs: number,
   headers: Record<string, string>, signal?: AbortSignal): Promise<SafeHttpResponse> {
   return new Promise((resolveRequest, reject) => {
-    const lookupPinned: LookupFunction = (_hostname, _options, callback) => {
-      callback(null, address.address, address.family);
+    const lookupPinned: LookupFunction = (_hostname, options, callback) => {
+      // Node 的 https/net 会带 { all: true } 调用 resolver；
+      // 此时必须返回地址数组，否则会报 Invalid IP address: undefined。
+      const wantsAll = typeof options === 'object' && options !== null && 'all' in options && options.all === true;
+      if (wantsAll) {
+        (callback as unknown as (error: Error | null, addresses: Array<{ address: string; family: number }>) => void)(
+          null, [{ address: address.address, family: address.family }],
+        );
+      } else {
+        callback(null, address.address, address.family);
+      }
     };
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
       method: 'GET',
