@@ -134,6 +134,16 @@ test('Web：登录、管理代理、播客注册、节目、采集和调度', as
   assert.equal(runs.status, 200);
   assert.ok(Array.isArray((await runs.json() as { runs: unknown[] }).runs));
 
+  const transcripts = await fetch(`${webUrl}/api/transcription/transcripts`, { headers: { cookie } });
+  assert.equal(transcripts.status, 200);
+  assert.deepEqual((await transcripts.json() as { transcripts: unknown[] }).transcripts, []);
+
+  const imported = await fetch(`${webUrl}/api/transcription/transcripts/import`, {
+    method: 'POST', headers: { cookie, 'x-csrf-token': csrf },
+  });
+  assert.equal(imported.status, 200);
+  assert.equal((await imported.json() as { imported: number }).imported, 0);
+
   const logout = await fetch(`${webUrl}/api/logout`, { method: 'POST', headers: { cookie } });
   assert.equal(logout.status, 200);
   assert.equal((await fetch(`${webUrl}/api/me`, { headers: { cookie } })).status, 401);

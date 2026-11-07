@@ -17,7 +17,7 @@
     apps: { title: '应用', subtitle: '任务定义与 Worker 凭据', render: renderApps },
     schedules: { title: '调度', subtitle: 'cron 调度、下次触发与运行历史', render: renderSchedules },
     'podcast-shows': { title: '节目库', subtitle: '节目、单集与两年范围采集', render: renderPodcastShows },
-    'transcribe-queue': { title: '转写队列', subtitle: '勾选单集、调整顺序、启动或暂停转写', render: renderTranscribeQueue },
+    'transcribe-queue': { title: '转写', subtitle: '队列、顺序与已入库转写稿', render: renderTranscribeQueue },
     'podcast-tasks': { title: '采集任务', subtitle: '播客任务列表与结果', render: renderPodcastTasks },
     transcript: { title: '转写稿', subtitle: '在 Web 中阅读转写 Markdown', render: renderTranscript },
   };
@@ -1075,9 +1075,13 @@
 
   async function renderTranscribeQueue() {
     setPageActions(actionButton('刷新', 'refresh', () => renderTranscribeQueue()));
-    const data = await transcription('/queue');
+    const [data, transcriptData] = await Promise.all([
+      transcription('/queue'),
+      transcription('/transcripts').catch(() => ({ transcripts: [] })),
+    ]);
     const items = data.items || [];
     const counts = data.counts || {};
+    const transcripts = transcriptData.transcripts || [];
     clear(content);
     content.append(el('div', { class: 'stats-grid' },
       statCard('待转写', counts.pending || 0, '按队列顺序执行', 'layers', 'blue'),
@@ -1136,6 +1140,41 @@
       el('div', { class: 'card-body flush' },
         items.length ? table(['#', '启用', '单集', '状态', '顺序 / 操作'], rows)
           : emptyState('队列为空', '去节目库打开单集，勾选后加入转写队列。', 'mic'))));
+
+    const transcriptRows = transcripts.map((transcript) => [
+      el('div', {},
+        el('div', { class: 'title-cell' }, transcript.title || '（无标题）'),
+        el('div', { class: 'sub' }, shortId(transcript.episode_id))),
+      transcript.show_title || shortId(transcript.show_id),
+      fmtDuration(transcript.duration_seconds),
+      `${transcript.segments || 0} 段`,
+      `${transcript.provider || '—'} / ${transcript.model || '—'}`,
+      fmtDateTime(transcript.created_at),
+      el('div', { class: 'row-actions' },
+        transcript.episode_id
+          ? actionButton('查看转写稿', 'tasks',
+            () => navigate(`transcript/${encodeURIComponent(transcript.episode_id)}`), 'btn btn-sm')
+          : null),
+    ]);
+
+    content.append(el('section', { class: 'card' },
+      el('div', { class: 'card-head' },
+        el('div', {}, el('div', { class: 'card-title' }, '已入库转写稿'),
+          el('div', { class: 'card-sub' }, '转写成功并写入服务端数据库的结果')),
+        el('div', { class: 'toolbar' },
+          actionButton('同步已有转写', 'refresh', async () => {
+            try {
+              const result = await transcription('/transcripts/import', { method: 'POST' });
+              toast(`导入 ${result.imported} 条转写稿`, 'success');
+              await renderTranscribeQueue();
+            } catch (error) {
+              toast(error.message, 'error');
+            }
+          }, 'btn btn-sm'))),
+      el('div', { class: 'card-body flush' },
+        transcripts.length
+          ? table(['单集', '节目', '时长', '片段', '引擎', '完成时间', '操作'], transcriptRows)
+          : emptyState('还没有入库的转写稿', '队列完成一集，或点击「同步已有转写」导入历史结果。', 'tasks'))));
   }
 
   function openAddShow() {

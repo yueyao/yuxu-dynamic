@@ -212,6 +212,11 @@ export function createWebServer(options: WebServerOptions): Server {
         }
         transcriptionQueue.updateProgress(running.id, task.progress ?? 0);
         if (task.status === 'succeeded') {
+          try {
+            await saveTranscriptFromTask(running.task_id, running, queueRunnerToken);
+          } catch (error) {
+            console.error('保存转写稿失败', error);
+          }
           transcriptionQueue.markDone(running.id);
         } else if (task.status === 'failed') {
           transcriptionQueue.markFailed(running.id, task.error ?? '任务失败');
@@ -252,6 +257,61 @@ export function createWebServer(options: WebServerOptions): Server {
     } finally {
       queueTicking = false;
     }
+  }
+
+  async function saveTranscriptFromTask(taskId: string,
+    item: { id: string; show_id: string; title: string }, token: string): Promise<boolean> {
+    if (transcriptionStore.getByTask(taskId)) return false;
+    const result = await platformJson<{ output?: Record<string, unknown> }>(
+      `/v1/tasks/${encodeURIComponent(taskId)}/result`, { token });
+    const output = result.output ?? {};
+    if (typeof output.text !== 'string' || output.text.length === 0) return false;
+    transcriptionStore.save({
+      taskId,
+      episodeId: item.id,
+      showId: item.show_id,
+      title: item.title,
+      language: typeof output.language === 'string' ? output.language : 'zh',
+      provider: typeof output.provider === 'string' ? output.provider : 'whisper-cli',
+      model: typeof output.model === 'string' ? output.model : '',
+      durationSeconds: typeof output.duration_seconds === 'number' ? output.duration_seconds : null,
+      text: output.text,
+      segments: Array.isArray(output.segments)
+        ? output.segments as Array<{ start: number; end: number; text: string }>
+        : [],
+      artifactId: typeof output.artifact_id === 'string' ? output.artifact_id : null,
+    });
+    return true;
+  }
+
+  async function importSuccessfulTranscripts(token: string, maxTasks = 500): Promise<number> {
+    let imported = 0;
+    let scanned = 0;
+    let cursor: string | undefined;
+    while (scanned < maxTasks) {
+      const query = new URLSearchParams({
+        app_id: 'transcription-tools', status: 'succeeded', limit: '100',
+      });
+      if (cursor) query.set('cursor', cursor);
+      const data = await platformJson<{
+        tasks: Array<{ task_id: string; input?: { episode_id?: string; show_id?: string; title?: string } | null }>;
+        next_cursor?: string | null;
+      }>(`/v1/tasks?${query}`, { token });
+      for (const task of data.tasks ?? []) {
+        scanned += 1;
+        const episodeId = task.input?.episode_id;
+        if (!episodeId || transcriptionStore.getByTask(task.task_id)) continue;
+        const saved = await saveTranscriptFromTask(task.task_id, {
+          id: episodeId,
+          show_id: task.input?.show_id ?? '',
+          title: task.input?.title ?? '',
+        }, token);
+        if (saved) imported += 1;
+      }
+      cursor = data.next_cursor ?? undefined;
+      if (!cursor || (data.tasks ?? []).length === 0) break;
+    }
+    return imported;
   }
 
   async function proxyPlatform(request: IncomingMessage, response: ServerResponse, session: Session,
@@ -450,6 +510,31 @@ export function createWebServer(options: WebServerOptions): Server {
     if (method === 'POST' && path === '/api/transcription/queue/clear') {
       const removed = transcriptionQueue.clearFinished();
       return sendJson(response, 200, { ok: true, removed, counts: transcriptionQueue.counts() });
+    }
+
+    if (method === 'GET' && path === '/api/transcription/transcripts') {
+      const titles = new Map(store.listShows().map((show) => [show.show_id, show.title]));
+      return sendJson(response, 200, {
+        transcripts: transcriptionStore.list(100).map((transcript) => ({
+          transcript_id: transcript.transcript_id,
+          task_id: transcript.task_id,
+          episode_id: transcript.episode_id,
+          show_id: transcript.show_id,
+          show_title: transcript.show_id ? titles.get(transcript.show_id) ?? null : null,
+          title: transcript.title,
+          language: transcript.language,
+          provider: transcript.provider,
+          model: transcript.model,
+          duration_seconds: transcript.duration_seconds,
+          segments: transcript.segments.length,
+          created_at: transcript.created_at,
+        })),
+      });
+    }
+
+    if (method === 'POST' && path === '/api/transcription/transcripts/import') {
+      const imported = await importSuccessfulTranscripts(session.token);
+      return sendJson(response, 200, { ok: true, imported });
     }
 
     const itemMatch = path.match(/^\/api\/transcription\/queue\/([^/]+)$/);
