@@ -93,7 +93,8 @@ Web POST /api/podcast/episodes/:id/transcribe
 
 ## 7. 验收
 
-- `yuxun version`、`yuxun doctor` 可用
+- `yuxun version`、`yuxun doctor`、`yuxun status` 可用
+- 默认帮助只展示日常命令，`yuxun help --all` 展示全部
 - LaunchAgent 执行 `cli.ts worker run`
 - Web 创建任务后 Worker 自动领取
 - 旧配置自动迁移

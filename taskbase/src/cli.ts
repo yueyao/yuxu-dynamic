@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Taskbase CLI：登录、应用注册、任务提交/查看/关闭/重试、产物下载。 */
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -203,40 +203,144 @@ async function waitTask(server: string, token: string, taskId: string, timeoutSe
   }
 }
 
-function usage(): string {
-  return `用法:
-  yuxun login [--server <URL>] [--username <name>]
-  yuxun logout
-  yuxun apps list
+async function readVersion(): Promise<string> {
+  try {
+    const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8')) as { version?: string };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function usage(showAll = false): string {
+  const common = `日常:
+  yuxun login [--server <URL>]    登录
+  yuxun logout                    退出登录
+  yuxun status                    查看登录、服务端与 Worker 状态
+  yuxun transcribe <audio-url>    提交音频转写并保存 Markdown
+  yuxun doctor                    本机环境自检
+  yuxun version                   版本信息
+
+Worker:
+  yuxun worker <run|install|start|stop|status|logs|uninstall>`;
+  if (!showAll) {
+    return `yuxun — 玉虚个人远程任务平台
+
+${common}
+
+高级命令:
+  yuxun help --all                查看任务、调度、应用等命令
+
+所有联网命令都支持 --server <URL>。`;
+  }
+  return `yuxun — 全部命令
+
+${common}
+
+任务:
+  yuxun task run <app-id/task-key> [--input <file|-> | --input-json <JSON>] [--wait] [--timeout <秒>]
+  yuxun task history [--app <id>] [--task-key <key>] [--status <status>] [--limit <1-100>]
+  yuxun task get|result|events|logs|close|retry <task-id>
+
+平台:
+  yuxun apps [list]
   yuxun app register <manifest.json>
   yuxun app rotate-token <app-id>
-  yuxun schedule add --app <app-id> --task <task-key> --cron "<5字段>" --timezone <IANA> [--input-json <JSON> | --input <file>] [--disabled]
-  yuxun schedule list
-  yuxun schedule get <schedule-id>
-  yuxun schedule update <schedule-id> [--cron <expr>] [--timezone <IANA>] [--input-json <JSON>] [--enable | --disable]
-  yuxun schedule remove <schedule-id>
-  yuxun schedule run-now <schedule-id>
-  yuxun schedule runs <schedule-id>
+  yuxun schedule add|list|get|update|remove|run-now|runs
+  yuxun artifact download <artifact-id> --out <path>
+
+所有联网命令都支持 --server <URL>。`;
+}
+
+function groupUsage(group: string): string {
+  switch (group) {
+    case 'task':
+      return `任务命令:
   yuxun task run <app-id/task-key> [--input <file|-> | --input-json <JSON>] [--idempotency-key <key>] [--wait] [--timeout <秒>]
+  yuxun task history [--app <id>] [--task-key <key>] [--status <status>] [--schedule <id>] [--limit <1-100>] [--cursor <cursor>]
   yuxun task get <task-id>
   yuxun task result <task-id>
   yuxun task events <task-id> [--after <event-id>]
   yuxun task logs <task-id> [--after <event-id>]
   yuxun task close <task-id> [--reason <text>]
-  yuxun task retry <task-id>
-  yuxun task history [--app <app-id>] [--task-key <key>] [--status <status>] [--schedule <schedule-id>] [--limit <1-100>] [--cursor <cursor>]
-  yuxun artifact download <artifact-id> --out <path>
-  yuxun worker <run|pair|doctor|install|start|stop|status|logs|uninstall> [...]
-  yuxun doctor
-  yuxun version
-  yuxun transcribe <audio-url> [--title <text>] [--language <code>] [--episode-id <id>] [--show-id <id>] [--out <path>] [--no-wait] [--timeout <秒>]
+  yuxun task retry <task-id>`;
+    case 'schedule':
+      return `调度命令:
+  yuxun schedule add --app <app-id> --task <task-key> --cron "<5字段>" --timezone <IANA> [--input-json <JSON> | --input <file>] [--disabled]
+  yuxun schedule list
+  yuxun schedule get <schedule-id>
+  yuxun schedule update <schedule-id> [--cron <expr>] [--timezone <IANA>] [--input-json <JSON>] [--enable | --disable]
+  yuxun schedule run-now <schedule-id>
+  yuxun schedule runs <schedule-id>
+  yuxun schedule remove <schedule-id>`;
+    case 'apps':
+    case 'app':
+      return `应用命令:
+  yuxun apps [list]
+  yuxun app register <manifest.json>
+  yuxun app rotate-token <app-id>`;
+    case 'artifact':
+      return `产物命令:
+  yuxun artifact download <artifact-id> --out <path>`;
+    case 'worker':
+      return `Worker 命令:
+  yuxun worker run                前台运行
+  yuxun worker install            安装为 LaunchAgent
+  yuxun worker start              启动后台服务
+  yuxun worker stop               停止后台服务
+  yuxun worker status             查看后台状态
+  yuxun worker logs [-f]          查看日志
+  yuxun worker doctor             检查 Worker 配置
+  yuxun worker pair               绑定 Worker Token
+  yuxun worker uninstall          卸载后台服务`;
+    default:
+      return usage();
+  }
+}
 
-所有联网命令都可加 --server <URL>；未指定时依次使用 YUXUN_URL / TASKBASE_URL、已登录服务器、${DEFAULT_SERVER}。`;
+async function workerState(): Promise<{ state: string; pid?: string }> {
+  const label = 'com.yuxun.worker';
+  try {
+    await access(join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`));
+  } catch {
+    return { state: '未安装' };
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+  const result = spawnSync('launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8' });
+  if (result.status !== 0) return { state: '未运行' };
+  const text = result.stdout ?? '';
+  return {
+    state: /state = (\w+)/.exec(text)?.[1] ?? 'unknown',
+    pid: /pid = (\d+)/.exec(text)?.[1],
+  };
+}
+
+async function statusCommand(args: string[]): Promise<void> {
+  const server = await resolveServer(option(args, '--server'));
+  const session = await readSession();
+  const loggedIn = Boolean(session && session.server === server);
+  let health = '不可达';
+  try {
+    const response = await fetch(new URL('/api/health', server), { signal: AbortSignal.timeout(3000) });
+    health = response.ok ? `正常（${response.status}）` : `异常（${response.status}）`;
+  } catch {}
+  const worker = await workerState();
+  const workerText = worker.state === 'running'
+    ? `运行中${worker.pid ? `（PID ${worker.pid}）` : ''}`
+    : worker.state;
+  console.log(`服务端：${server}`);
+  console.log(`健康检查：${health}`);
+  console.log(`登录：${loggedIn ? '已登录' : '未登录'}`);
+  console.log(`Worker：${workerText}`);
+  console.log(`版本：${await readVersion()}`);
+  if (!loggedIn) console.log('\n提示：运行 yuxun login 登录');
+  if (worker.state === '未安装') console.log('提示：运行 yuxun worker install 安装后台服务');
+  else if (worker.state !== 'running') console.log('提示：运行 yuxun worker start 启动后台服务');
 }
 
 async function main(args = process.argv.slice(2)): Promise<void> {
-  if (args.length === 0 || args[0] === 'help' || args.includes('--help')) {
-    console.log(usage());
+  if (args.length === 0 || ['help', '--help', '-h'].includes(args[0])) {
+    console.log(usage(args.includes('--all')));
     return;
   }
 
@@ -247,8 +351,7 @@ async function main(args = process.argv.slice(2)): Promise<void> {
   }
 
   if (args[0] === 'version') {
-    const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8')) as { version?: string };
-    console.log(`yuxun ${pkg.version ?? 'unknown'}`);
+    console.log(`yuxun ${await readVersion()}`);
     console.log(`runtime: ${ROOT}`);
     return;
   }
@@ -262,7 +365,11 @@ async function main(args = process.argv.slice(2)): Promise<void> {
   }
 
   if (args[0] === 'worker') {
-    const command = args[1] ?? 'run';
+    if (args.length === 1 || args[1] === '--help' || args[1] === '-h') {
+      console.log(groupUsage('worker'));
+      return;
+    }
+    const command = args[1] as string;
     if (command === 'run') {
       const { runTranscriptionWorker } = await import('./transcription/worker.ts');
       await runTranscriptionWorker();
@@ -284,6 +391,21 @@ async function main(args = process.argv.slice(2)): Promise<void> {
   }
 
   const explicitServer = option(args, '--server');
+
+  if (args[0] === 'status') {
+    await statusCommand(args);
+    return;
+  }
+
+  if (args[1] === '--help' || args[1] === '-h') {
+    console.log(groupUsage(args[0]));
+    return;
+  }
+
+  if (['task', 'schedule', 'app', 'artifact'].includes(args[0]) && args.length === 1) {
+    console.log(groupUsage(args[0]));
+    return;
+  }
 
   if (args[0] === 'login') {
     const server = await resolveServer(explicitServer);
@@ -354,7 +476,7 @@ async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  if (args[0] === 'apps' && args[1] === 'list') {
+  if (args[0] === 'apps' && (args[1] === undefined || args[1] === 'list')) {
     print((await request(server, '/v1/apps', { token })).data);
     return;
   }

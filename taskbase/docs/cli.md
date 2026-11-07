@@ -1,8 +1,38 @@
 # Yuxun CLI 使用文档
 
-更新：2026-11-06
+更新：2026-11-07
 命令名：`yuxun`
 定位：管理远端 Taskbase，并控制 Mac 上的转写 Worker。
+
+## 命令总览
+
+`yuxun` 默认只展示日常命令：
+
+```text
+yuxun login / logout
+yuxun status
+yuxun transcribe <audio-url>
+yuxun worker <run|install|start|stop|status|logs|uninstall>
+yuxun doctor
+yuxun version
+```
+
+任务、调度、应用、产物属于脚本与自动化命令，默认收起：
+
+```sh
+yuxun help --all
+```
+
+命令分组：
+
+| 分组 | 命令 | 用途 |
+| --- | --- | --- |
+| 日常 | `login`、`logout`、`status`、`transcribe`、`doctor`、`version` | 人手操作 |
+| Worker | `worker run/install/start/stop/status/logs/doctor/pair/uninstall` | Mac 后台转写 |
+| 任务 | `task run/history/get/result/events/logs/close/retry` | 脚本查询、排障 |
+| 平台 | `apps`、`app register/rotate-token`、`schedule ...`、`artifact download` | 应用与调度管理 |
+
+`yuxun <分组>` 不带参数时只打印该分组帮助，例如 `yuxun task`、`yuxun worker`。
 
 ## 1. 安装形态
 
@@ -64,7 +94,23 @@ Session 默认保存到：
 yuxun logout
 ```
 
-## 3. 应用与任务
+登录后先确认整体状态：
+
+```sh
+yuxun status
+```
+
+输出示例：
+
+```text
+服务端：http://43.156.253.152
+健康检查：正常（200）
+登录：已登录
+Worker：运行中（PID 6840）
+版本：0.5.0
+```
+
+## 3. 应用与任务（高级）
 
 ```sh
 yuxun apps list
@@ -91,7 +137,7 @@ yuxun task run app-id/task-key \
 
 也可用 `--input <file>` 或 `--input -` 从标准输入读取 JSON。
 
-## 4. 调度
+## 4. 调度（高级）
 
 ```sh
 yuxun schedule add \
@@ -110,7 +156,7 @@ yuxun schedule runs <schedule-id>
 yuxun schedule remove <schedule-id>
 ```
 
-## 5. 产物
+## 5. 产物（高级）
 
 ```sh
 yuxun artifact download <artifact-id> --out ./transcript.md

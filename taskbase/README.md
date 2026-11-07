@@ -120,9 +120,12 @@ CLI 仍可用：
 export YUXUN_URL='http://127.0.0.1:3333'
 export YUXUN_PASSWORD='change-me-to-a-long-password'
 yuxun login
-yuxun apps list
-yuxun task history --limit 20
+yuxun status
+yuxun transcribe '<audio-url>'
 ```
+
+日常命令只有 `login/logout/status/transcribe/worker/doctor/version`；
+任务、调度、应用、产物命令用 `yuxun help --all` 查看。
 
 ## Web 页面与截图
 
