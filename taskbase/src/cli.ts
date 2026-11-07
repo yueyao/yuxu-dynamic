@@ -73,6 +73,16 @@ function has(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+function options(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === name && args[index + 1] && !args[index + 1].startsWith('--')) {
+      values.push(args[index + 1]);
+    }
+  }
+  return values;
+}
+
 async function resolveServer(explicit?: string): Promise<string> {
   if (explicit) return explicit.replace(/\/+$/, '');
   const envServer = envValue('YUXUN_URL', 'TASKBASE_URL');
@@ -220,6 +230,7 @@ function usage(showAll = false): string {
   yuxun ps                        查看进行中的任务
   yuxun transcribe <audio-url>    提交音频转写并保存 Markdown
   yuxun stop <task-id>            结束任务
+  yuxun batch                     批量转写：预览队列，--yes 开始
   yuxun doctor                    本机环境自检
   yuxun version                   版本信息
 
@@ -284,6 +295,13 @@ function groupUsage(group: string): string {
     case 'artifact':
       return `产物命令:
   yuxun artifact download <artifact-id> --out <path>`;
+    case 'batch':
+      return `批量转写:
+  yuxun batch [--show <节目名|ID>] [--limit N] [--order newest|oldest|shortest|longest|given]
+              [--since YYYY-MM-DD] [--until YYYY-MM-DD]
+              [--episode <id>] [--exclude <id>] [--include-done]
+              [--dry-run] [--yes]
+  默认只预览；加 --yes 才会提交。Ctrl-C 在当前一集完成后停止。`;
     case 'worker':
       return `Worker 命令:
   yuxun worker run                前台运行
@@ -346,7 +364,7 @@ type TaskRow = {
   task_key: string;
   status: string;
   progress: number;
-  input?: { title?: string; audio_url?: string; show_id?: string } | null;
+  input?: { title?: string; audio_url?: string; show_id?: string; episode_id?: string } | null;
 };
 
 async function psCommand(args: string[]): Promise<void> {
@@ -369,6 +387,279 @@ async function psCommand(args: string[]): Promise<void> {
     console.log(`${task.status}\t${task.progress ?? 0}%\t${task.app_id}/${task.task_key}\t${String(title).slice(0, 40)}\t${task.task_id}`);
   }
   if (!has(args, '--all')) console.log('\n结束任务：yuxun stop <task-id>');
+}
+
+type BatchEpisode = {
+  episode_id: string;
+  show_id: string;
+  show_title: string;
+  title: string;
+  duration_seconds: number | null;
+  published_at: string | null;
+  audio_url: string;
+};
+
+type BatchOrder = 'newest' | 'oldest' | 'shortest' | 'longest' | 'given';
+
+const BATCH_ORDERS: BatchOrder[] = ['newest', 'oldest', 'shortest', 'longest', 'given'];
+
+async function webLogin(server: string, username: string, password: string): Promise<string> {
+  const response = await fetch(new URL('/api/login', server), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Web 登录失败：${text.slice(0, 200)}`);
+  const cookie = (response.headers.get('set-cookie') ?? '').split(';')[0];
+  if (!cookie) throw new Error('Web 登录没有返回会话 Cookie');
+  return cookie;
+}
+
+async function webGet(server: string, cookie: string, path: string): Promise<Record<string, unknown>> {
+  const response = await fetch(new URL(path, server), {
+    headers: { cookie },
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Web API ${path} 失败：${response.status} ${text.slice(0, 200)}`);
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
+function batchDate(value: string, endOfDay: boolean): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`日期格式应为 YYYY-MM-DD：${value}`);
+  const time = Date.parse(`${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`);
+  if (!Number.isFinite(time)) throw new Error(`日期无效：${value}`);
+  return time;
+}
+
+function batchDuration(seconds: number | null): string {
+  if (!seconds || seconds <= 0) return '-';
+  const minutes = Math.round(seconds / 60);
+  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+function sortBatch(episodes: BatchEpisode[], order: BatchOrder): BatchEpisode[] {
+  const time = (episode: BatchEpisode) => episode.published_at ? Date.parse(episode.published_at) : 0;
+  const duration = (episode: BatchEpisode) => episode.duration_seconds ?? 0;
+  if (order === 'given') return [...episodes];
+  return [...episodes].sort((left, right) => {
+    if (order === 'shortest') return duration(left) - duration(right);
+    if (order === 'longest') return duration(right) - duration(left);
+    return order === 'oldest' ? time(left) - time(right) : time(right) - time(left);
+  });
+}
+
+async function doneEpisodeIds(server: string, token: string): Promise<Set<string>> {
+  const done = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 50; page += 1) {
+    const query = new URLSearchParams({ app_id: 'transcription-tools', status: 'succeeded', limit: '100' });
+    if (cursor) query.set('cursor', cursor);
+    const data = (await request(server, `/v1/tasks?${query}`, { token })).data as
+      { tasks: TaskRow[]; next_cursor?: string | null };
+    for (const task of data.tasks ?? []) {
+      if (task.input?.episode_id) done.add(task.input.episode_id);
+    }
+    cursor = data.next_cursor ?? undefined;
+    if (!cursor) break;
+  }
+  return done;
+}
+
+async function collectBatch(server: string, cookie: string, args: string[], doneIds: Set<string>): Promise<{
+  selected: BatchEpisode[];
+  skippedDone: number;
+  totalEpisodes: number;
+  showCount: number;
+}> {
+  const showsData = await webGet(server, cookie, '/api/podcast/shows');
+  let shows = (showsData.shows ?? []) as Array<{ show_id: string; title: string }>;
+  const showFilters = options(args, '--show');
+  if (showFilters.length > 0) {
+    shows = shows.filter((show) => showFilters.some((filter) =>
+      filter === show.show_id || show.title.includes(filter)));
+  }
+  if (shows.length === 0) throw new Error('没有匹配的节目');
+
+  const lists = await Promise.all(shows.map((show) => webGet(server, cookie,
+    `/api/podcast/shows/${encodeURIComponent(show.show_id)}/episodes?limit=500`)));
+  const episodes: BatchEpisode[] = [];
+  lists.forEach((data, index) => {
+    const show = shows[index];
+    for (const raw of (data.episodes ?? []) as Array<Record<string, unknown>>) {
+      if (typeof raw.audio_url !== 'string' || !raw.audio_url) continue;
+      episodes.push({
+        episode_id: String(raw.episode_id),
+        show_id: show.show_id,
+        show_title: show.title,
+        title: String(raw.title ?? ''),
+        duration_seconds: typeof raw.duration_seconds === 'number' ? raw.duration_seconds : null,
+        published_at: typeof raw.published_at === 'string' ? raw.published_at : null,
+        audio_url: raw.audio_url,
+      });
+    }
+  });
+
+  const since = option(args, '--since');
+  const until = option(args, '--until');
+  const sinceTime = since ? batchDate(since, false) : null;
+  const untilTime = until ? batchDate(until, true) : null;
+  const onlyIds = new Set(options(args, '--episode'));
+  const excluded = new Set(options(args, '--exclude'));
+
+  let candidates = episodes.filter((episode) => {
+    if (onlyIds.size > 0 && !onlyIds.has(episode.episode_id)) return false;
+    if (excluded.has(episode.episode_id)) return false;
+    if (sinceTime !== null) {
+      const published = episode.published_at ? Date.parse(episode.published_at) : 0;
+      if (published < sinceTime) return false;
+    }
+    if (untilTime !== null) {
+      const published = episode.published_at ? Date.parse(episode.published_at) : 0;
+      if (published > untilTime) return false;
+    }
+    return true;
+  });
+
+  let skippedDone = 0;
+  if (!has(args, '--include-done')) {
+    const before = candidates.length;
+    candidates = candidates.filter((episode) => !doneIds.has(episode.episode_id));
+    skippedDone = before - candidates.length;
+  }
+
+  const order = (option(args, '--order') ?? 'newest') as BatchOrder;
+  if (!BATCH_ORDERS.includes(order)) throw new Error(`--order 只支持 ${BATCH_ORDERS.join(' / ')}`);
+  if (order === 'given' && onlyIds.size > 0) {
+    const position = new Map(options(args, '--episode').map((id, index) => [id, index]));
+    candidates = [...candidates].sort((left, right) =>
+      (position.get(left.episode_id) ?? 0) - (position.get(right.episode_id) ?? 0));
+  } else {
+    candidates = sortBatch(candidates, order);
+  }
+
+  const rawLimit = option(args, '--limit');
+  if (rawLimit !== undefined) {
+    const limit = Number(rawLimit);
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('--limit 必须是正整数');
+    candidates = candidates.slice(0, limit);
+  }
+
+  return { selected: candidates, skippedDone, totalEpisodes: episodes.length, showCount: shows.length };
+}
+
+async function submitBatchTask(server: string, token: string, episode: BatchEpisode): Promise<string> {
+  const response = await fetch(new URL('/v1/tasks', server), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+      'idempotency-key': `batch-${episode.episode_id}`,
+    },
+    body: JSON.stringify({
+      task: 'transcription-tools/episode/transcribe',
+      input: {
+        audio_url: episode.audio_url,
+        episode_id: episode.episode_id,
+        show_id: episode.show_id,
+        title: episode.title,
+        language: 'zh',
+      },
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`提交失败：${text.slice(0, 300)}`);
+  return (JSON.parse(text) as { task: { task_id: string } }).task.task_id;
+}
+
+async function waitBatchTask(server: string, token: string, taskId: string): Promise<Record<string, unknown>> {
+  const startedAt = Date.now();
+  let lastProgress = -1;
+  while (true) {
+    const task = (await request(server, `/v1/tasks/${encodeURIComponent(taskId)}`, { token })).data as
+      Record<string, unknown>;
+    const progress = typeof task.progress === 'number' ? task.progress : 0;
+    if (progress !== lastProgress) {
+      lastProgress = progress;
+      console.log(`  ${String(task.status)} ${progress}%`);
+    }
+    if (['succeeded', 'failed', 'closed'].includes(String(task.status))) return task;
+    if (Date.now() - startedAt > 6 * 60 * 60 * 1000) {
+      await request(server, `/v1/tasks/${encodeURIComponent(taskId)}/close`,
+        { method: 'POST', token, body: { reason: 'batch timeout' } }).catch(() => {});
+      throw new Error('任务超过 6 小时，已关闭');
+    }
+    await new Promise((done) => setTimeout(done, 5_000));
+  }
+}
+
+async function batchCommand(args: string[], server: string, token: string): Promise<void> {
+  const username = option(args, '--username')
+    ?? envValue('YUXUN_OWNER_USERNAME', 'TASKBASE_OWNER_USERNAME', 'owner') as string;
+  const password = process.env.YUXUN_PASSWORD ?? process.env.TASKBASE_PASSWORD ?? await promptPassword();
+  const cookie = await webLogin(server, username, password);
+  const doneIds = await doneEpisodeIds(server, token);
+  const { selected, skippedDone, totalEpisodes, showCount } = await collectBatch(server, cookie, args, doneIds);
+  const order = option(args, '--order') ?? 'newest';
+
+  console.log(`节目 ${showCount} 个，可转写单集 ${totalEpisodes} 集，已转写跳过 ${skippedDone} 集`);
+  if (selected.length === 0) {
+    console.log('没有需要转写的单集');
+    return;
+  }
+  console.log(`本次计划 ${selected.length} 集，顺序 ${order}`);
+  for (const [index, episode] of selected.slice(0, 10).entries()) {
+    console.log(`  ${index + 1}. [${episode.show_title}] ${episode.title.slice(0, 50)}  ${batchDuration(episode.duration_seconds)}`);
+  }
+  if (selected.length > 10) console.log(`  ... 其余 ${selected.length - 10} 集`);
+  if (!has(args, '--yes') || has(args, '--dry-run')) {
+    console.log('\n这是预览；加 --yes 开始执行');
+    return;
+  }
+
+  let stopped = false;
+  const onInterrupt = () => {
+    stopped = true;
+    console.log('\n收到 Ctrl-C：当前任务完成后停止');
+  };
+  process.on('SIGINT', onInterrupt);
+
+  let succeeded = 0;
+  let failed = 0;
+  let consecutiveFailures = 0;
+  for (const [index, episode] of selected.entries()) {
+    if (stopped) break;
+    console.log(`\n[${index + 1}/${selected.length}] [${episode.show_title}] ${episode.title}`);
+    try {
+      const taskId = await submitBatchTask(server, token, episode);
+      const task = await waitBatchTask(server, token, taskId);
+      if (task.status === 'succeeded') {
+        succeeded += 1;
+        consecutiveFailures = 0;
+      } else {
+        failed += 1;
+        consecutiveFailures += 1;
+        console.log(`  失败：${String(task.error ?? task.status)}`);
+        if (consecutiveFailures >= 3) {
+          console.log('连续失败 3 次，停止批量任务');
+          break;
+        }
+      }
+    } catch (error) {
+      failed += 1;
+      consecutiveFailures += 1;
+      console.log(`  错误：${(error as Error).message}`);
+      if (consecutiveFailures >= 3) {
+        console.log('连续失败 3 次，停止批量任务');
+        break;
+      }
+    }
+  }
+  process.off('SIGINT', onInterrupt);
+  console.log(`\n批量结束：成功 ${succeeded} 集，失败 ${failed} 集`);
 }
 
 async function main(args = process.argv.slice(2)): Promise<void> {
@@ -462,6 +753,11 @@ async function main(args = process.argv.slice(2)): Promise<void> {
 
   if (args[0] === 'ps') {
     await psCommand(args);
+    return;
+  }
+
+  if (args[0] === 'batch') {
+    await batchCommand(args, server, token);
     return;
   }
 

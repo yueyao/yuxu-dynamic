@@ -1,6 +1,6 @@
 {
   "name": "yuxun",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "玉虚个人远程任务平台 CLI 与 Mac 转写服务",

@@ -20,6 +20,7 @@ test('默认帮助只展示日常命令', () => {
   assert.match(output, /yuxun ps/);
   assert.match(output, /yuxun transcribe/);
   assert.match(output, /yuxun stop/);
+  assert.match(output, /yuxun batch/);
   assert.match(output, /yuxun worker/);
   assert.doesNotMatch(output, /yuxun task run/);
   assert.match(output, /help --all/);
@@ -31,6 +32,13 @@ test('help --all 展示任务、调度与平台命令', () => {
   assert.match(output, /yuxun schedule add/);
   assert.match(output, /yuxun apps/);
   assert.match(output, /yuxun artifact download/);
+});
+
+test('batch --help 展示筛选参数', () => {
+  const output = run('batch', '--help');
+  assert.match(output, /--show/);
+  assert.match(output, /--order/);
+  assert.match(output, /--yes/);
 });
 
 test('stop 不带任务号时只提示用法', () => {
