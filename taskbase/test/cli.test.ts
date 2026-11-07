@@ -17,7 +17,9 @@ function run(...args: string[]): string {
 test('默认帮助只展示日常命令', () => {
   const output = run('help');
   assert.match(output, /yuxun status/);
+  assert.match(output, /yuxun ps/);
   assert.match(output, /yuxun transcribe/);
+  assert.match(output, /yuxun stop/);
   assert.match(output, /yuxun worker/);
   assert.doesNotMatch(output, /yuxun task run/);
   assert.match(output, /help --all/);
@@ -29,6 +31,10 @@ test('help --all 展示任务、调度与平台命令', () => {
   assert.match(output, /yuxun schedule add/);
   assert.match(output, /yuxun apps/);
   assert.match(output, /yuxun artifact download/);
+});
+
+test('stop 不带任务号时只提示用法', () => {
+  assert.match(run('stop'), /yuxun stop <task-id>/);
 });
 
 test('分组命令不带参数时只打印帮助', () => {

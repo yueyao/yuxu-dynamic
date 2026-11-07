@@ -11,7 +11,9 @@
 ```text
 yuxun login / logout
 yuxun status
+yuxun ps
 yuxun transcribe <audio-url>
+yuxun stop <task-id>
 yuxun worker <run|install|start|stop|status|logs|uninstall>
 yuxun doctor
 yuxun version
@@ -27,7 +29,7 @@ yuxun help --all
 
 | 分组 | 命令 | 用途 |
 | --- | --- | --- |
-| 日常 | `login`、`logout`、`status`、`transcribe`、`doctor`、`version` | 人手操作 |
+| 日常 | `login`、`logout`、`status`、`ps`、`transcribe`、`stop`、`doctor`、`version` | 人手操作 |
 | Worker | `worker run/install/start/stop/status/logs/doctor/pair/uninstall` | Mac 后台转写 |
 | 任务 | `task run/history/get/result/events/logs/close/retry` | 脚本查询、排障 |
 | 平台 | `apps`、`app register/rotate-token`、`schedule ...`、`artifact download` | 应用与调度管理 |
@@ -106,11 +108,68 @@ yuxun status
 服务端：http://43.156.253.152
 健康检查：正常（200）
 登录：已登录
-Worker：运行中（PID 6840）
-版本：0.5.0
+Worker：运行中（PID 3411）
+版本：0.6.0
 ```
 
-## 3. 应用与任务（高级）
+## 3. 开始、查看与结束任务
+
+### 开始一集转写
+
+```sh
+yuxun transcribe '<audio-url>' \
+  --title '单集标题' \
+  --language zh \
+  --out ./transcript.md
+```
+
+也可以直接在 Web 单集页点击“转写”，由后台 Worker 领取。
+
+### 查看进行中的任务
+
+```sh
+yuxun ps
+```
+
+输出示例：
+
+```text
+running	45%	transcription-tools/episode/transcribe	SP00 ...	<task-id>
+queued	0%	transcription-tools/episode/transcribe	E230 ...	<task-id>
+```
+
+查看最近全部任务（含已结束）：
+
+```sh
+yuxun ps --all
+```
+
+单集详情与实时日志：
+
+```sh
+yuxun task get <task-id>
+yuxun task events <task-id>
+yuxun task logs <task-id>
+```
+
+### 结束任务
+
+```sh
+yuxun stop <task-id>
+yuxun stop <task-id> --reason '内容选错了'
+```
+
+等价于 `yuxun task close <task-id>`。任务会标记为 `closed`；Worker 在下一次心跳或当前切片结束时停止。
+
+### 停止/启动 Worker
+
+```sh
+yuxun worker stop
+yuxun worker start
+yuxun worker status
+```
+
+## 4. 应用与任务（高级）
 
 ```sh
 yuxun apps list
@@ -137,7 +196,7 @@ yuxun task run app-id/task-key \
 
 也可用 `--input <file>` 或 `--input -` 从标准输入读取 JSON。
 
-## 4. 调度（高级）
+## 5. 调度（高级）
 
 ```sh
 yuxun schedule add \
@@ -156,13 +215,13 @@ yuxun schedule runs <schedule-id>
 yuxun schedule remove <schedule-id>
 ```
 
-## 5. 产物（高级）
+## 6. 产物（高级）
 
 ```sh
 yuxun artifact download <artifact-id> --out ./transcript.md
 ```
 
-## 6. 转写任务：CLI 与 Worker 的分工
+## 7. 转写任务：CLI 与 Worker 的分工
 
 这是最容易混淆的一点。
 
@@ -221,7 +280,7 @@ yuxun transcribe '<audio-url>' \
 
 当前限制：只接受公开 HTTP(S) URL，不支持直接上传本机音频文件。
 
-## 7. Worker 与 macOS 后台服务
+## 8. Worker 与 macOS 后台服务
 
 ```sh
 yuxun doctor
@@ -277,7 +336,7 @@ cat taskbase/.deploy/transcription-worker-token
 
 Token 一旦轮换，需要重新执行 `yuxun worker pair`。
 
-## 8. 配置与环境变量
+## 9. 配置与环境变量
 
 ### 当前环境变量
 
@@ -312,7 +371,7 @@ Token 一旦轮换，需要重新执行 `yuxun worker pair`。
 /etc/taskbase/podcast-worker.env
 ```
 
-## 9. 开发模式
+## 10. 开发模式
 
 在仓库内不使用全局命令时：
 
@@ -325,7 +384,7 @@ npm run install:global
 
 生产/日常建议统一使用全局 `yuxun`。
 
-## 10. 升级
+## 11. 升级
 
 ```sh
 cd /Users/dynamic/Documents/GitHub/yuxu-dynamic/taskbase
@@ -337,7 +396,7 @@ yuxun worker install
 
 `yuxun worker install` 会重新写入后台服务并重启。
 
-## 11. 排错
+## 12. 排错
 
 ### `yuxun: command not found`
 
@@ -384,7 +443,7 @@ yuxun worker status
 
 必要时在正常 Terminal 中执行，避免受限终端环境。
 
-## 12. 相关文档
+## 13. 相关文档
 
 - [Yuxun Web 使用文档](web.md)
 - [CLI 架构审计](cli-architecture.md)

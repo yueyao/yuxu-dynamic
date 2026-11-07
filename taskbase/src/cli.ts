@@ -217,7 +217,9 @@ function usage(showAll = false): string {
   yuxun login [--server <URL>]    登录
   yuxun logout                    退出登录
   yuxun status                    查看登录、服务端与 Worker 状态
+  yuxun ps                        查看进行中的任务
   yuxun transcribe <audio-url>    提交音频转写并保存 Markdown
+  yuxun stop <task-id>            结束任务
   yuxun doctor                    本机环境自检
   yuxun version                   版本信息
 
@@ -338,6 +340,37 @@ async function statusCommand(args: string[]): Promise<void> {
   else if (worker.state !== 'running') console.log('提示：运行 yuxun worker start 启动后台服务');
 }
 
+type TaskRow = {
+  task_id: string;
+  app_id: string;
+  task_key: string;
+  status: string;
+  progress: number;
+  input?: { title?: string; audio_url?: string; show_id?: string } | null;
+};
+
+async function psCommand(args: string[]): Promise<void> {
+  const server = await resolveServer(option(args, '--server'));
+  const token = await authenticated(server);
+  const result = await request(server, '/v1/tasks?limit=100', { token });
+  const tasks = (result.data as { tasks: TaskRow[] }).tasks ?? [];
+  const active = tasks.filter((task) => ['queued', 'running', 'recovering'].includes(task.status));
+  const rows = has(args, '--all') ? tasks.slice(0, 30) : active;
+  if (rows.length === 0) {
+    console.log('没有进行中的任务');
+    return;
+  }
+  if (has(args, '--json')) {
+    print(rows);
+    return;
+  }
+  for (const task of rows) {
+    const title = task.input?.title ?? task.input?.show_id ?? '';
+    console.log(`${task.status}\t${task.progress ?? 0}%\t${task.app_id}/${task.task_key}\t${String(title).slice(0, 40)}\t${task.task_id}`);
+  }
+  if (!has(args, '--all')) console.log('\n结束任务：yuxun stop <task-id>');
+}
+
 async function main(args = process.argv.slice(2)): Promise<void> {
   if (args.length === 0 || ['help', '--help', '-h'].includes(args[0])) {
     console.log(usage(args.includes('--all')));
@@ -397,6 +430,11 @@ async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (args[0] === 'stop' && !args[1]) {
+    console.log('用法：yuxun stop <task-id>');
+    return;
+  }
+
   if (args[1] === '--help' || args[1] === '-h') {
     console.log(groupUsage(args[0]));
     return;
@@ -421,6 +459,19 @@ async function main(args = process.argv.slice(2)): Promise<void> {
 
   const server = await resolveServer(explicitServer);
   const token = await authenticated(server);
+
+  if (args[0] === 'ps') {
+    await psCommand(args);
+    return;
+  }
+
+  if (args[0] === 'stop' && args[1]) {
+    const reason = option(args, '--reason') ?? 'manual stop';
+    print((await request(server, `/v1/tasks/${encodeURIComponent(args[1])}/close`, {
+      method: 'POST', token, body: { reason },
+    })).data);
+    return;
+  }
 
   if (args[0] === 'transcribe') {
     const audioUrl = args[1];
