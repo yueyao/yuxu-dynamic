@@ -27,6 +27,7 @@ test('Web：登录、管理代理、播客注册、节目、采集和调度', as
   const platformUrl = `http://127.0.0.1:${(platformServer.address() as AddressInfo).port}`;
   const webServer = createWebServer({
     platformUrl, dbPath, publicDir, requestLog: () => {},
+    transcriptApiToken: 'test-transcript-token',
   });
   await new Promise<void>((resolve) => webServer.listen(0, '127.0.0.1', resolve));
   const webUrl = `http://127.0.0.1:${(webServer.address() as AddressInfo).port}`;
@@ -137,6 +138,18 @@ test('Web：登录、管理代理、播客注册、节目、采集和调度', as
   const transcripts = await fetch(`${webUrl}/api/transcription/transcripts`, { headers: { cookie } });
   assert.equal(transcripts.status, 200);
   assert.deepEqual((await transcripts.json() as { transcripts: unknown[] }).transcripts, []);
+
+  const apiUnauthorized = await fetch(`${webUrl}/api/v1/transcripts`);
+  assert.equal(apiUnauthorized.status, 401);
+  const apiList = await fetch(`${webUrl}/api/v1/transcripts`, {
+    headers: { authorization: 'Bearer test-transcript-token' },
+  });
+  assert.equal(apiList.status, 200);
+  assert.deepEqual((await apiList.json() as { transcripts: unknown[] }).transcripts, []);
+  const apiMissing = await fetch(`${webUrl}/api/v1/transcripts/transcript-missing`, {
+    headers: { authorization: 'Bearer test-transcript-token' },
+  });
+  assert.equal(apiMissing.status, 404);
 
   const logout = await fetch(`${webUrl}/api/logout`, { method: 'POST', headers: { cookie } });
   assert.equal(logout.status, 200);

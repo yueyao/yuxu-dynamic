@@ -133,4 +133,30 @@ export class TranscriptionStore {
       .all(safe) as TranscriptRow[];
     return rows.map((row) => this.toRecord(row));
   }
+
+  getById(id: string): TranscriptRecord | null {
+    const row = this.db.prepare('SELECT * FROM transcription_transcripts WHERE id = ?')
+      .get(id) as TranscriptRow | undefined;
+    return row ? this.toRecord(row) : null;
+  }
+
+  listPage(options: {
+    limit?: number; offset?: number; showId?: string; episodeId?: string;
+  } = {}): { items: TranscriptRecord[]; next_offset: number | null } {
+    const limit = Number.isSafeInteger(options.limit)
+      ? Math.min(Math.max(options.limit as number, 1), 100) : 20;
+    const offset = Number.isSafeInteger(options.offset)
+      ? Math.max(options.offset as number, 0) : 0;
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (options.showId) { clauses.push('show_id = ?'); params.push(options.showId); }
+    if (options.episodeId) { clauses.push('episode_id = ?'); params.push(options.episodeId); }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`SELECT * FROM transcription_transcripts ${where}
+      ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as TranscriptRow[];
+    return {
+      items: rows.map((row) => this.toRecord(row)),
+      next_offset: rows.length === limit ? offset + limit : null,
+    };
+  }
 }

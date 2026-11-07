@@ -2,7 +2,7 @@
  * 播客 Web 端：登录会话 + 平台管理 API 代理 + 播客领域 API + 静态页面。
  * 浏览器只拿到 Web 会话 Cookie，不接触平台 Owner Token 或 Worker Token。
  */
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { resolve } from 'node:path';
@@ -12,6 +12,7 @@ import { PODCAST_APP_ID, podcastManifest } from '../src/podcast/manifest.ts';
 import { TRANSCRIPTION_APP_ID, transcriptionManifest } from '../src/transcription/manifest.ts';
 import { TranscriptionStore } from '../src/transcription/store.ts';
 import { TranscriptionQueueStore } from '../src/transcription/queue.ts';
+import { renderTranscriptMarkdown } from '../src/transcription/markdown.ts';
 
 const MAX_JSON_BYTES = 256 * 1024;
 const DEFAULT_PUBLIC_DIR = resolve(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -26,6 +27,7 @@ export type WebServerOptions = {
   sessionTtlMs?: number;
   cookieSecure?: boolean;
   fetchImpl?: typeof fetch;
+  transcriptApiToken?: string;
   requestLog?: (record: Record<string, unknown>) => void;
 };
 
@@ -112,6 +114,44 @@ function getPathSuffix(path: string, prefix: string): string | null {
   return path.slice(prefix.length) || '/';
 }
 
+function transcriptMetadata(transcript: ReturnType<TranscriptionStore['list']>[number]): Record<string, unknown> {
+  return {
+    transcript_id: transcript.transcript_id,
+    task_id: transcript.task_id,
+    episode_id: transcript.episode_id,
+    show_id: transcript.show_id,
+    title: transcript.title,
+    language: transcript.language,
+    provider: transcript.provider,
+    model: transcript.model,
+    duration_seconds: transcript.duration_seconds,
+    segments: transcript.segments.length,
+    created_at: transcript.created_at,
+  };
+}
+
+function transcriptMarkdown(transcript: ReturnType<TranscriptionStore['list']>[number]): string {
+  return renderTranscriptMarkdown({
+    title: transcript.title,
+    language: transcript.language,
+    provider: transcript.provider,
+    model: transcript.model,
+    durationSeconds: transcript.duration_seconds,
+    text: transcript.text,
+    segments: transcript.segments,
+  });
+}
+
+function sendMarkdown(response: ServerResponse, filename: string, markdown: string): void {
+  response.writeHead(200, {
+    'content-type': 'text/markdown; charset=utf-8',
+    'content-disposition': `attachment; filename="${filename}"`,
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  });
+  response.end(markdown);
+}
+
 export function createWebServer(options: WebServerOptions): Server {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
   const sessionTtlMs = options.sessionTtlMs ?? 12 * 60 * 60 * 1000;
@@ -120,6 +160,8 @@ export function createWebServer(options: WebServerOptions): Server {
   const store = new PodcastStore(options.dbPath);
   const transcriptionStore = new TranscriptionStore(options.dbPath);
   const transcriptionQueue = new TranscriptionQueueStore(options.dbPath);
+  const transcriptApiToken = options.transcriptApiToken
+    ?? process.env.TASKBASE_TRANSCRIPT_API_TOKEN ?? '';
   let queueRunnerToken: string | null = null;
   let queueTicking = false;
   const sessions = new Map<string, Session>();
@@ -154,6 +196,49 @@ export function createWebServer(options: WebServerOptions): Server {
     if (typeof token !== 'string' || token !== session.csrf) {
       throw new WebError(403, 'CSRF_FAILED', 'CSRF 校验失败，请刷新页面');
     }
+  }
+
+  function transcriptApiAuthorized(request: IncomingMessage): boolean {
+    if (!transcriptApiToken) return false;
+    const header = request.headers.authorization;
+    if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
+    const provided = Buffer.from(header.slice(7));
+    const expected = Buffer.from(transcriptApiToken);
+    return provided.length === expected.length && timingSafeEqual(provided, expected);
+  }
+
+  async function handleTranscriptApi(response: ServerResponse, method: string,
+    path: string, url: URL): Promise<void> {
+    if (method !== 'GET') throw new WebError(405, 'METHOD_NOT_ALLOWED', '只支持 GET');
+    if (path === '/api/v1/transcripts') {
+      const rawLimit = Number(url.searchParams.get('limit') ?? '20');
+      const rawOffset = Number(url.searchParams.get('cursor') ?? '0');
+      const { items, next_offset } = transcriptionStore.listPage({
+        limit: Number.isFinite(rawLimit) ? rawLimit : 20,
+        offset: Number.isFinite(rawOffset) ? rawOffset : 0,
+        showId: url.searchParams.get('show_id') ?? undefined,
+        episodeId: url.searchParams.get('episode_id') ?? undefined,
+      });
+      return sendJson(response, 200, {
+        transcripts: items.map(transcriptMetadata),
+        next_cursor: next_offset === null ? null : String(next_offset),
+      });
+    }
+
+    const markdownMatch = path.match(/^\/api\/v1\/transcripts\/([^/]+)\/markdown$/);
+    const detailMatch = path.match(/^\/api\/v1\/transcripts\/([^/]+)$/);
+    if (markdownMatch || detailMatch) {
+      const id = decodeURIComponent((markdownMatch ?? detailMatch)![1]);
+      const transcript = transcriptionStore.getById(id);
+      if (!transcript) throw new WebError(404, 'TRANSCRIPT_NOT_FOUND', '转写稿不存在');
+      if (markdownMatch) {
+        return sendMarkdown(response, `${transcript.transcript_id}.md`,
+          transcriptMarkdown(transcript));
+      }
+      return sendJson(response, 200, { transcript });
+    }
+
+    throw new WebError(404, 'NOT_FOUND', '转写 API 不存在');
   }
 
   async function platformJson<T = any>(path: string, init: {
@@ -333,6 +418,16 @@ export function createWebServer(options: WebServerOptions): Server {
         return sendJson(response, 200, { ok: true });
       }
 
+      if (path.startsWith('/api/v1/transcripts')) {
+        if (!transcriptApiToken) {
+          throw new WebError(503, 'API_DISABLED', '外部转写 API 未配置 Token');
+        }
+        if (!transcriptApiAuthorized(request)) {
+          throw new WebError(401, 'UNAUTHORIZED', '无效的 API Token');
+        }
+        return await handleTranscriptApi(response, method, path, url);
+      }
+
       if (method === 'GET' && publicFiles[path]) {
         const entry = publicFiles[path];
         const data = await readFile(resolve(publicDir, entry.file));
@@ -500,6 +595,14 @@ export function createWebServer(options: WebServerOptions): Server {
           created_at: transcript.created_at,
         })),
       });
+    }
+
+    const transcriptMarkdownMatch = path.match(/^\/api\/transcription\/transcripts\/([^/]+)\/markdown$/);
+    if (method === 'GET' && transcriptMarkdownMatch) {
+      const transcript = transcriptionStore.getById(decodeURIComponent(transcriptMarkdownMatch[1]));
+      if (!transcript) throw new WebError(404, 'TRANSCRIPT_NOT_FOUND', '转写稿不存在');
+      return sendMarkdown(response, `${transcript.transcript_id}.md`,
+        transcriptMarkdown(transcript));
     }
 
     const itemMatch = path.match(/^\/api\/transcription\/queue\/([^/]+)$/);

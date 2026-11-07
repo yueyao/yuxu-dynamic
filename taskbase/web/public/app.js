@@ -1476,6 +1476,13 @@
     }
     setPageActions(
       back,
+      actionButton('下载 Markdown', 'download', () => {
+        if (!transcript.transcript_id) {
+          toast('缺少转写稿 ID，无法下载', 'error');
+          return;
+        }
+        window.location.href = `/api/transcription/transcripts/${encodeURIComponent(transcript.transcript_id)}/markdown`;
+      }, 'btn btn-primary'),
       actionButton('复制原文', 'tasks', async () => {
         try { await navigator.clipboard.writeText(transcript.text); toast('已复制转写原文', 'success'); }
         catch { toast('复制失败，请手动选择文本', 'error'); }

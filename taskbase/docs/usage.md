@@ -1,6 +1,6 @@
 # Taskbase 文档导航
 
-更新：2026-11-06
+更新：2026-11-07
 
 Taskbase 的 Web 服务和 CLI 是两套独立客户端，文档分开维护。
 
@@ -10,6 +10,7 @@ Taskbase 的 Web 服务和 CLI 是两套独立客户端，文档分开维护。
 | --- | --- |
 | [Yuxun Web 使用文档](web.md) | 登录、节目库、采集、任务、调度、转写稿阅读 |
 | [Yuxun CLI 使用文档](cli.md) | 安装、登录、任务、调度、产物、Worker |
+| [转写稿对外 API](api.md) | Bearer Token、列表、详情、Markdown 下载 |
 
 ## 设计与运维
 

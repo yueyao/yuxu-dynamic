@@ -97,6 +97,7 @@ cat taskbase/.deploy/tencent-owner-password
 - 队列完成的单集自动写入服务端数据库，完成后立刻出现在这里
 - 每行显示单集、节目、时长、片段数、引擎、完成时间
 - 点「查看转写稿」进入阅读页
+- 阅读页右上角可以「下载 Markdown」
 
 ### 阅读转写稿
 
@@ -113,7 +114,8 @@ cat taskbase/.deploy/tencent-owner-password
 - Markdown 标题、列表、段落、时间戳会直接渲染
 - 页面显示语言、Provider、模型、时长、片段数
 - 可以「复制原文」
-- 不需要下载文件
+- 可以「下载 Markdown」保存 `.md` 文件
+- 外部系统可以通过 [转写稿对外 API](api.md) 读取
 
 转写稿页面需要登录 Web；直接打开 URL 时会先走登录。
 

@@ -13,6 +13,7 @@ import type { TranscriptSegment } from './store.ts';
 import type { AsrProvider, AsrResult } from './asr.ts';
 import { createAsrProvider } from './providers.ts';
 import { SafeHttpClient } from './safe-http.ts';
+import { renderTranscriptMarkdown } from './markdown.ts';
 
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 
@@ -140,37 +141,6 @@ export function mergeChunks(chunks: Array<{ offset: number; result: AsrResult }>
   };
 }
 
-function timestamp(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds));
-  const h = Math.floor(total / 3600).toString().padStart(2, '0');
-  const m = Math.floor((total % 3600) / 60).toString().padStart(2, '0');
-  const s = (total % 60).toString().padStart(2, '0');
-  return `${h}:${m}:${s}`;
-}
-
-function markdown(task: TaskInput, provider: AsrProvider, result: {
-  text: string; segments: TranscriptSegment[]; language: string; durationSeconds: number;
-}): string {
-  const lines = [
-    `# ${task.title ?? '转写稿'}`,
-    '',
-    `- 语言：${result.language}`,
-    `- 时长：${timestamp(result.durationSeconds)}`,
-    `- 引擎：${provider.name} / ${provider.model}`,
-    '',
-    '## 文字稿',
-    '',
-    result.text,
-  ];
-  if (result.segments.length > 0) {
-    lines.push('', '## 时间戳', '');
-    for (const segment of result.segments) {
-      lines.push(`- [${timestamp(segment.start)} → ${timestamp(segment.end)}] ${segment.text}`);
-    }
-  }
-  return `${lines.join('\n')}\n`;
-}
-
 export async function executeTranscriptionLease(client: WorkerClient, lease: WorkerLease,
   options: TranscriptionWorkerOptions = {}): Promise<void> {
   if (lease.app_id !== TRANSCRIPTION_APP_ID || lease.task_key !== 'episode/transcribe') {
@@ -210,7 +180,15 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
       }
       const result = mergeChunks(completed);
       await active.progress(lease, 88, '生成文字稿');
-      const artifact = Buffer.from(markdown(task, provider, result), 'utf8');
+      const artifact = Buffer.from(renderTranscriptMarkdown({
+        title: task.title ?? null,
+        language: result.language,
+        provider: provider.name,
+        model: provider.model,
+        durationSeconds: result.durationSeconds,
+        text: result.text,
+        segments: result.segments,
+      }), 'utf8');
       const artifactId = await active.uploadArtifact(lease, 'transcript.md', artifact, 'text/markdown; charset=utf-8');
       await active.progress(lease, 95, '上传完成');
       await active.complete(lease, {
