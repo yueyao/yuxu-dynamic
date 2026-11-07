@@ -11,6 +11,7 @@ import { PodcastError, PodcastStore } from '../src/podcast/store.ts';
 import { PODCAST_APP_ID, podcastManifest } from '../src/podcast/manifest.ts';
 import { TRANSCRIPTION_APP_ID, transcriptionManifest } from '../src/transcription/manifest.ts';
 import { TranscriptionStore } from '../src/transcription/store.ts';
+import { TranscriptionQueueStore } from '../src/transcription/queue.ts';
 
 const MAX_JSON_BYTES = 256 * 1024;
 const DEFAULT_PUBLIC_DIR = resolve(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -118,6 +119,9 @@ export function createWebServer(options: WebServerOptions): Server {
   const fetchImpl = options.fetchImpl ?? fetch;
   const store = new PodcastStore(options.dbPath);
   const transcriptionStore = new TranscriptionStore(options.dbPath);
+  const transcriptionQueue = new TranscriptionQueueStore(options.dbPath);
+  let queueRunnerToken: string | null = null;
+  let queueTicking = false;
   const sessions = new Map<string, Session>();
   const loginAttempts = new Map<string, LoginAttempt>();
 
@@ -185,6 +189,68 @@ export function createWebServer(options: WebServerOptions): Server {
           `${appLabel}尚未注册或任务定义不存在，请先在“平台管理 → 应用”注册`);
       }
       throw error;
+    }
+  }
+
+  async function queueTick(): Promise<void> {
+    if (queueTicking || !queueRunnerToken) return;
+    queueTicking = true;
+    try {
+      const running = transcriptionQueue.running();
+      if (running?.task_id) {
+        let task: { status: string; progress?: number; error?: string | null; close_reason?: string | null };
+        try {
+          task = await platformJson(`/v1/tasks/${encodeURIComponent(running.task_id)}`,
+            { token: queueRunnerToken });
+        } catch (error) {
+          if (error instanceof WebError && error.status === 401) {
+            queueRunnerToken = null;
+            transcriptionQueue.setState('paused', '1');
+            transcriptionQueue.setState('error', 'Web 登录已失效，请重新登录后点击开始');
+          }
+          return;
+        }
+        transcriptionQueue.updateProgress(running.id, task.progress ?? 0);
+        if (task.status === 'succeeded') {
+          transcriptionQueue.markDone(running.id);
+        } else if (task.status === 'failed') {
+          transcriptionQueue.markFailed(running.id, task.error ?? '任务失败');
+        } else if (task.status === 'closed') {
+          transcriptionQueue.markFailed(running.id, task.close_reason ?? '任务已关闭');
+        } else if (task.status === 'queued' && running.started_at
+          && Date.now() - running.started_at > 10 * 60 * 1000) {
+          await platformJson(`/v1/tasks/${encodeURIComponent(running.task_id)}/close`, {
+            method: 'POST', token: queueRunnerToken, body: { reason: 'worker offline' },
+          }).catch(() => {});
+          transcriptionQueue.markFailed(running.id, 'Worker 10 分钟内未领取，队列已暂停');
+          transcriptionQueue.setState('paused', '1');
+          transcriptionQueue.setState('error', 'Worker 未领取任务，请确认 Worker 在线后点击继续');
+        }
+        return;
+      }
+
+      if (transcriptionQueue.getState('paused') === '1') return;
+      const next = transcriptionQueue.next();
+      if (!next) return;
+      try {
+        const created = await platformCreateTask(queueRunnerToken,
+          `${TRANSCRIPTION_APP_ID}/episode/transcribe`, {
+            audio_url: next.audio_url,
+            episode_id: next.id,
+            show_id: next.show_id,
+            title: next.title,
+            language: 'zh',
+          }, '转写应用');
+        transcriptionQueue.markRunning(next.id, created.task.task_id);
+        transcriptionQueue.setState('error', null);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '提交任务失败';
+        transcriptionQueue.markFailed(next.id, message);
+        transcriptionQueue.setState('error', message);
+        transcriptionQueue.setState('paused', '1');
+      }
+    } finally {
+      queueTicking = false;
     }
   }
 
@@ -320,7 +386,7 @@ export function createWebServer(options: WebServerOptions): Server {
             method: 'POST', token: session.token, body: transcriptionManifest,
           }));
         }
-        throw new WebError(404, 'NOT_FOUND', '转写接口不存在');
+        return await handleTranscriptionQueue(request, response, session, method, path);
       }
 
       throw new WebError(404, 'NOT_FOUND', '接口不存在');
@@ -336,6 +402,102 @@ export function createWebServer(options: WebServerOptions): Server {
       return sendJson(response, 500, { error: { code: 'INTERNAL_ERROR', message: '服务内部错误' } });
     }
   });
+
+  async function handleTranscriptionQueue(request: IncomingMessage, response: ServerResponse,
+    session: Session, method: string, path: string): Promise<void> {
+    if (method === 'GET' && path === '/api/transcription/queue') {
+      return sendJson(response, 200, {
+        items: transcriptionQueue.list(),
+        counts: transcriptionQueue.counts(),
+        paused: transcriptionQueue.getState('paused') === '1',
+        error: transcriptionQueue.getState('error'),
+        runner: queueRunnerToken !== null,
+      });
+    }
+
+    if (method === 'POST' && path === '/api/transcription/queue') {
+      const body = await readJson(request);
+      const ids = Array.isArray(body.episode_ids)
+        ? body.episode_ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
+        : [];
+      if (ids.length === 0) throw new WebError(400, 'INVALID_INPUT', 'episode_ids 不能为空');
+      const episodes = ids.map((id) => store.getEpisode(id)).filter((episode) => episode !== null);
+      for (const episode of episodes) {
+        if (!episode.audio_url) throw new WebError(409, 'AUDIO_URL_MISSING', `单集没有音频地址：${episode.title}`);
+      }
+      const result = transcriptionQueue.add(episodes.map((episode) => ({
+        episode_id: episode.episode_id,
+        show_id: episode.show_id,
+        title: episode.title,
+        audio_url: episode.audio_url ?? '',
+      })));
+      return sendJson(response, 200, { ...result, counts: transcriptionQueue.counts() });
+    }
+
+    if (method === 'POST' && path === '/api/transcription/queue/start') {
+      queueRunnerToken = session.token;
+      transcriptionQueue.setState('paused', '0');
+      transcriptionQueue.setState('error', null);
+      void queueTick();
+      return sendJson(response, 200, { ok: true, runner: true });
+    }
+
+    if (method === 'POST' && path === '/api/transcription/queue/pause') {
+      transcriptionQueue.setState('paused', '1');
+      return sendJson(response, 200, { ok: true, paused: true });
+    }
+
+    if (method === 'POST' && path === '/api/transcription/queue/clear') {
+      const removed = transcriptionQueue.clearFinished();
+      return sendJson(response, 200, { ok: true, removed, counts: transcriptionQueue.counts() });
+    }
+
+    const itemMatch = path.match(/^\/api\/transcription\/queue\/([^/]+)$/);
+    if (itemMatch && method === 'PATCH') {
+      const id = decodeURIComponent(itemMatch[1]);
+      if (!transcriptionQueue.get(id)) throw new WebError(404, 'QUEUE_ITEM_NOT_FOUND', '队列项不存在');
+      const body = await readJson(request);
+      if (typeof body.enabled !== 'boolean') {
+        throw new WebError(400, 'INVALID_INPUT', 'enabled 必须是 boolean');
+      }
+      return sendJson(response, 200, { item: transcriptionQueue.setEnabled(id, body.enabled) });
+    }
+
+    if (itemMatch && method === 'DELETE') {
+      const id = decodeURIComponent(itemMatch[1]);
+      try {
+        if (!transcriptionQueue.remove(id)) throw new WebError(404, 'QUEUE_ITEM_NOT_FOUND', '队列项不存在');
+      } catch (error) {
+        if (error instanceof Error && !(error instanceof WebError)) {
+          throw new WebError(409, 'QUEUE_ITEM_RUNNING', error.message);
+        }
+        throw error;
+      }
+      return sendJson(response, 200, { ok: true, counts: transcriptionQueue.counts() });
+    }
+
+    const moveMatch = path.match(/^\/api\/transcription\/queue\/([^/]+)\/move$/);
+    if (moveMatch && method === 'POST') {
+      const id = decodeURIComponent(moveMatch[1]);
+      const body = await readJson(request);
+      if (body.direction !== 'up' && body.direction !== 'down') {
+        throw new WebError(400, 'INVALID_INPUT', 'direction 必须是 up 或 down');
+      }
+      const moved = transcriptionQueue.move(id, body.direction);
+      if (!moved) throw new WebError(409, 'QUEUE_MOVE_FAILED', '已经在边界或队列项不存在');
+      return sendJson(response, 200, { items: transcriptionQueue.list() });
+    }
+
+    const retryMatch = path.match(/^\/api\/transcription\/queue\/([^/]+)\/retry$/);
+    if (retryMatch && method === 'POST') {
+      const id = decodeURIComponent(retryMatch[1]);
+      const item = transcriptionQueue.retry(id);
+      if (!item) throw new WebError(404, 'QUEUE_ITEM_NOT_FOUND', '队列项不存在');
+      return sendJson(response, 200, { item });
+    }
+
+    throw new WebError(404, 'NOT_FOUND', '转写队列接口不存在');
+  }
 
   async function handlePodcast(request: IncomingMessage, response: ServerResponse, session: Session,
     method: string, path: string, url: URL): Promise<void> {
@@ -526,8 +688,12 @@ export function createWebServer(options: WebServerOptions): Server {
     for (const [remote, attempt] of loginAttempts) if (attempt.until <= now) loginAttempts.delete(remote);
   }, 10 * 60_000);
   cleanup.unref();
+  const queueTimer = setInterval(() => { void queueTick(); }, 10_000);
+  queueTimer.unref();
   server.on('close', () => {
     clearInterval(cleanup);
+    clearInterval(queueTimer);
+    transcriptionQueue.close();
     transcriptionStore.close();
     store.close();
   });

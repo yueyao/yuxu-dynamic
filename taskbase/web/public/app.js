@@ -17,6 +17,7 @@
     apps: { title: '应用', subtitle: '任务定义与 Worker 凭据', render: renderApps },
     schedules: { title: '调度', subtitle: 'cron 调度、下次触发与运行历史', render: renderSchedules },
     'podcast-shows': { title: '节目库', subtitle: '节目、单集与两年范围采集', render: renderPodcastShows },
+    'transcribe-queue': { title: '转写队列', subtitle: '勾选单集、调整顺序、启动或暂停转写', render: renderTranscribeQueue },
     'podcast-tasks': { title: '采集任务', subtitle: '播客任务列表与结果', render: renderPodcastTasks },
     transcript: { title: '转写稿', subtitle: '在 Web 中阅读转写 Markdown', render: renderTranscript },
   };
@@ -333,6 +334,7 @@
 
   const platform = (path, options = {}) => api(`/api/platform${path}`, options);
   const podcast = (path, options = {}) => api(`/api/podcast${path}`, options);
+  const transcription = (path, options = {}) => api(`/api/transcription${path}`, options);
 
   async function loadApps(force = false) {
     if (state.apps.length && !force) return;
@@ -1033,6 +1035,109 @@
       ])) : emptyState('还没有采集记录', '同步节目后会在这里显示每次运行结果。', 'clock'))));
   }
 
+  function queueBadge(status) {
+    const map = {
+      pending: ['queued', '待转写'],
+      running: ['running', '运行中'],
+      done: ['succeeded', '已完成'],
+      failed: ['failed', '失败'],
+      canceled: ['closed', '已取消'],
+    };
+    const [className, label] = map[status] || ['unknown', status || '未知'];
+    return el('span', { class: `badge badge-${className}` }, label);
+  }
+
+  async function queueAction(action, successMessage) {
+    try {
+      await transcription(`/queue/${action}`, { method: 'POST' });
+      toast(successMessage, 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    await renderTranscribeQueue();
+  }
+
+  async function queueItem(id, action, body) {
+    try {
+      const method = action === 'delete' ? 'DELETE' : 'POST';
+      const path = action === 'delete'
+        ? `/queue/${encodeURIComponent(id)}`
+        : action === 'retry'
+          ? `/queue/${encodeURIComponent(id)}/retry`
+          : `/queue/${encodeURIComponent(id)}/move`;
+      await transcription(path, { method, body: body || undefined });
+      toast(action === 'delete' ? '已移除' : action === 'retry' ? '已重新入队' : '已调整顺序', 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    await renderTranscribeQueue();
+  }
+
+  async function renderTranscribeQueue() {
+    setPageActions(actionButton('刷新', 'refresh', () => renderTranscribeQueue()));
+    const data = await transcription('/queue');
+    const items = data.items || [];
+    const counts = data.counts || {};
+    clear(content);
+    content.append(el('div', { class: 'stats-grid' },
+      statCard('待转写', counts.pending || 0, '按队列顺序执行', 'layers', 'blue'),
+      statCard('运行中', counts.running || 0, data.runner ? '队列已启动' : '尚未启动', 'play', 'green'),
+      statCard('已完成', counts.done || 0, '可清空', 'check', 'purple'),
+      statCard('失败', counts.failed || 0, '可重试', 'alert', 'amber')));
+
+    if (data.error) {
+      content.append(el('div', { class: 'notice notice-warn' },
+        el('div', {}, el('strong', {}, '队列已暂停'), el('div', { class: 'hint' }, data.error))));
+    }
+
+    const toolbar = el('div', { class: 'row-actions' },
+      data.paused
+        ? actionButton('开始队列', 'play', () => queueAction('start', '队列已启动'), 'btn btn-primary')
+        : actionButton('暂停队列', 'x', () => queueAction('pause', '队列已暂停'), 'btn'),
+      actionButton('清空已结束', 'x', () => queueAction('clear', '已清理结束项'), 'btn btn-sm'),
+      actionButton('去节目库选单集', 'mic', () => navigate('podcast-shows'), 'btn btn-sm'));
+
+    const rows = items.map((item, index) => [
+      el('span', { class: 'nowrap' }, index + 1),
+      el('input', {
+        type: 'checkbox', checked: item.enabled, disabled: item.status === 'running',
+        'aria-label': `启用 ${item.title}`,
+        onChange: async (event) => {
+          await transcription(`/queue/${encodeURIComponent(item.id)}`, {
+            method: 'PATCH', body: { enabled: event.target.checked },
+          });
+          toast(event.target.checked ? '已启用' : '已停用', 'success');
+        },
+      }),
+      el('div', {},
+        el('div', { class: 'title-cell' }, item.title),
+        el('div', { class: 'sub' }, shortId(item.show_id))),
+      el('div', {},
+        queueBadge(item.status),
+        item.status === 'running' ? progressCell(item.progress, 'running') : null,
+        item.error ? el('div', { class: 'sub', style: 'color:var(--red)', title: item.error },
+          String(item.error).slice(0, 80)) : null),
+      el('div', { class: 'row-actions' },
+        actionButton('上移', 'arrow', () => queueItem(item.id, 'move', { direction: 'up' }), 'btn btn-sm'),
+        actionButton('下移', 'arrow', () => queueItem(item.id, 'move', { direction: 'down' }), 'btn btn-sm'),
+        item.status === 'failed'
+          ? actionButton('重试', 'refresh', () => queueItem(item.id, 'retry', null), 'btn btn-sm')
+          : null,
+        item.status === 'running'
+          ? null
+          : actionButton('移除', 'x', () => queueItem(item.id, 'delete', null), 'btn btn-sm')),
+    ]);
+
+    content.append(el('section', { class: 'card' },
+      el('div', { class: 'card-head' },
+        el('div', {}, el('div', { class: 'card-title' }, '转写队列'),
+          el('div', { class: 'card-sub' }, `共 ${items.length} 项；Web 负责选择与顺序，Worker 只执行平台下发的任务`)),
+        toolbar),
+      el('div', { class: 'card-body flush' },
+        items.length ? table(['#', '启用', '单集', '状态', '顺序 / 操作'], rows)
+          : emptyState('队列为空', '去节目库打开单集，勾选后加入转写队列。', 'mic'))));
+  }
+
   function openAddShow() {
     const url = el('input', { class: 'input', placeholder: 'https://www.xiaoyuzhoufm.com/podcast/...' });
     const title = el('input', { class: 'input', placeholder: '可留空，同步时自动填充' });
@@ -1112,11 +1217,58 @@
   async function openEpisodes(show) {
     const data = await podcast(`/shows/${encodeURIComponent(show.show_id)}/episodes?limit=200`);
     const episodes = data.episodes || [];
-    showModal({
-      title: `单集 · ${show.title}`,
-      subtitle: `${episodes.length} 条已入库；转写需要 Transcription Worker 在线`,
-      wide: true,
-      body: episodes.length ? table(['标题', '发布时间', '时长', '来源', '操作'], episodes.map((episode) => [
+    const selected = new Set();
+    const rowChecks = [];
+
+    const counter = el('span', { class: 'hint' }, '勾选单集后加入队列');
+    const addButton = actionButton('加入转写队列', 'plus', async () => {
+      if (selected.size === 0) return;
+      try {
+        const result = await transcription('/queue', {
+          method: 'POST', body: { episode_ids: [...selected] },
+        });
+        toast(`已加入 ${result.added} 集${result.skipped ? `，跳过 ${result.skipped} 集` : ''}`, 'success');
+        closeModal();
+        if (state.route === 'transcribe-queue') await renderTranscribeQueue();
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    }, 'btn btn-sm btn-primary');
+    addButton.disabled = true;
+
+    const syncSelection = () => {
+      addButton.disabled = selected.size === 0;
+      counter.textContent = selected.size ? `已选 ${selected.size} 集` : '勾选单集后加入队列';
+    };
+
+    const selectAll = el('input', {
+      type: 'checkbox', 'aria-label': '全选本页',
+      onChange: (event) => {
+        selected.clear();
+        for (const checkbox of rowChecks) {
+          checkbox.checked = event.target.checked;
+          if (event.target.checked) selected.add(checkbox.dataset.episodeId);
+        }
+        syncSelection();
+      },
+    });
+
+    const toolbar = el('div', { class: 'toolbar' },
+      el('label', { class: 'checkbox-row' }, selectAll, el('span', {}, '全选本页')),
+      counter, addButton);
+
+    const rows = episodes.map((episode) => {
+      const checkbox = el('input', {
+        type: 'checkbox', 'aria-label': `选择 ${episode.title}`, dataset: { episodeId: episode.episode_id },
+        onChange: (event) => {
+          if (event.target.checked) selected.add(episode.episode_id);
+          else selected.delete(episode.episode_id);
+          syncSelection();
+        },
+      });
+      rowChecks.push(checkbox);
+      return [
+        checkbox,
         el('div', {},
           el('div', { class: 'title-cell' }, episode.title),
           episode.description ? el('div', { class: 'sub' }, String(episode.description).slice(0, 110)) : null),
@@ -1126,7 +1278,21 @@
         el('div', { class: 'row-actions' },
           actionButton('转写', 'mic', () => transcribeEpisode(episode), 'btn btn-sm'),
           actionButton('转写稿', 'tasks', () => openTranscript(episode), 'btn btn-sm')),
-      ])) : emptyState('还没有单集', '点击同步后按日期范围入库。', 'mic'),
+      ];
+    });
+
+    const body = el('div', {},
+      toolbar,
+      episodes.length
+        ? table(['', '标题', '发布时间', '时长', '来源', '操作'], rows)
+        : emptyState('还没有单集', '点击同步后按日期范围入库。', 'mic'));
+
+    let closeModal = () => {};
+    closeModal = showModal({
+      title: `单集 · ${show.title}`,
+      subtitle: `${episodes.length} 条已入库；勾选后加入 Web 转写队列`,
+      wide: true,
+      body,
     });
   }
 
