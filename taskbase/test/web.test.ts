@@ -146,6 +146,13 @@ test('Web：登录、管理代理、播客注册、节目、采集和调度', as
   });
   assert.equal(apiList.status, 200);
   assert.deepEqual((await apiList.json() as { transcripts: unknown[] }).transcripts, []);
+  const apiQueue = await fetch(`${webUrl}/api/v1/queue`, {
+    headers: { authorization: 'Bearer test-transcript-token' },
+  });
+  assert.equal(apiQueue.status, 200);
+  assert.deepEqual((await apiQueue.json() as { counts: Record<string, number> }).counts, {
+    pending: 0, running: 0, done: 0, failed: 0, canceled: 0,
+  });
   const apiMissing = await fetch(`${webUrl}/api/v1/transcripts/transcript-missing`, {
     headers: { authorization: 'Bearer test-transcript-token' },
   });

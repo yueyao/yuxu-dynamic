@@ -1094,8 +1094,9 @@
         el('div', {}, el('strong', {}, '队列已暂停'), el('div', { class: 'hint' }, data.error))));
     }
 
+    const queueStopped = data.paused || !data.runner;
     const toolbar = el('div', { class: 'row-actions' },
-      data.paused
+      queueStopped
         ? actionButton('开始队列', 'play', () => queueAction('start', '队列已启动'), 'btn btn-primary')
         : actionButton('暂停队列', 'x', () => queueAction('pause', '队列已暂停'), 'btn'),
       actionButton('清空已结束', 'x', () => queueAction('clear', '已清理结束项'), 'btn btn-sm'),

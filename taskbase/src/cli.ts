@@ -217,7 +217,7 @@ function usage(showAll = false): string {
   yuxun login [--server <URL>]    登录
   yuxun logout                    退出登录
   yuxun status                    查看登录、服务端与 Worker 状态
-  yuxun ps                        查看进行中的任务
+  yuxun ps                        查看转写队列与任务
   yuxun transcribe <audio-url>    提交音频转写并保存 Markdown
   yuxun stop <task-id>            结束任务
   yuxun doctor                    本机环境自检
@@ -349,9 +349,67 @@ type TaskRow = {
   input?: { title?: string; audio_url?: string; show_id?: string } | null;
 };
 
+type QueueSnapshot = {
+  counts: Record<string, number>;
+  paused: boolean;
+  error: string | null;
+  runner: boolean;
+  items: Array<{
+    id: string; show_id: string; show_title?: string | null; title: string;
+    status: string; progress: number; enabled: boolean; task_id: string | null;
+  }>;
+};
+
+function printQueue(snapshot: QueueSnapshot, args: string[]): void {
+  const counts = snapshot.counts ?? {};
+  console.log(`队列：待转写 ${counts.pending ?? 0}，运行中 ${counts.running ?? 0}，已完成 ${counts.done ?? 0}，失败 ${counts.failed ?? 0}`);
+  const running = (counts.running ?? 0) > 0;
+  if (snapshot.paused) console.log('状态：已暂停');
+  else if (!snapshot.runner) {
+    console.log(running
+      ? '状态：调度未启动（当前任务仍在执行，完成后不会自动继续）'
+      : '状态：未启动（在 Web 转写页点「开始队列」）');
+  }
+  if (snapshot.error) console.log(`错误：${snapshot.error}`);
+
+  const items = snapshot.items ?? [];
+  const rows = has(args, '--all') ? items : items.filter((item) => item.status !== 'done');
+  if (rows.length === 0) {
+    console.log('没有待处理的队列项');
+    return;
+  }
+  const shown = has(args, '--all') ? rows : rows.slice(0, 20);
+  if (has(args, '--json')) {
+    print(shown);
+    return;
+  }
+  console.log('状态\t进度\t节目\t单集\t任务');
+  for (const item of shown) {
+    console.log([
+      item.status,
+      `${item.progress ?? 0}%`,
+      (item.show_title ?? item.show_id ?? '—').slice(0, 16),
+      String(item.title ?? '').slice(0, 40),
+      item.task_id ?? '—',
+    ].join('\t'));
+  }
+  if (!has(args, '--all') && rows.length > shown.length) {
+    console.log(`\n还有 ${rows.length - shown.length} 条待处理；yuxun ps --all 查看全部`);
+  }
+}
+
 async function psCommand(args: string[]): Promise<void> {
   const server = await resolveServer(option(args, '--server'));
   const token = await authenticated(server);
+  if (!has(args, '--tasks')) {
+    try {
+      const snapshot = (await request(server, '/api/v1/queue', { token })).data as QueueSnapshot;
+      printQueue(snapshot, args);
+      return;
+    } catch {
+      // 旧服务端没有队列接口时回退到平台任务。
+    }
+  }
   const result = await request(server, '/v1/tasks?limit=100', { token });
   const tasks = (result.data as { tasks: TaskRow[] }).tasks ?? [];
   const active = tasks.filter((task) => ['queued', 'running', 'recovering'].includes(task.status));

@@ -127,7 +127,7 @@ yuxun transcribe '<audio-url>' \
 
 批量转写的选择、排序和启停都在 Web 的「转写队列」完成；CLI 不负责挑选单集，只负责登录、查看、结束和单集提交。
 
-### 查看进行中的任务
+### 查看转写队列
 
 ```sh
 yuxun ps
@@ -136,14 +136,23 @@ yuxun ps
 输出示例：
 
 ```text
-running	45%	transcription-tools/episode/transcribe	SP00 ...	<task-id>
-queued	0%	transcription-tools/episode/transcribe	E230 ...	<task-id>
+队列：待转写 94，运行中 1，已完成 3，失败 0
+状态：未启动（在 Web 转写页点「开始队列」）
+状态	进度	节目	单集	任务
+running	44%	知行小酒馆	E257 对话少楠...	<task-id>
+pending	0%	知行小酒馆	E256 等等，经济...	—
 ```
 
-查看最近全部任务（含已结束）：
+默认显示待转写/运行中的前 20 条，并给出总计；查看全部（含已完成）：
 
 ```sh
 yuxun ps --all
+```
+
+`yuxun ps` 读取的是 Web 转写队列，不是平台任务列表。要看平台原始任务：
+
+```sh
+yuxun ps --tasks
 ```
 
 单集详情与实时日志：

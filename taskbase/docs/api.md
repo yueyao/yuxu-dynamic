@@ -21,6 +21,37 @@ Token 来源：
 
 未配置 Token 时接口返回 `503 API_DISABLED`；Token 错误返回 `401 UNAUTHORIZED`。
 
+## 转写队列
+
+```http
+GET /api/v1/queue
+```
+
+返回 Web 转写队列快照：
+
+```json
+{
+  "counts": { "pending": 94, "running": 1, "done": 3, "failed": 0, "canceled": 0 },
+  "paused": false,
+  "error": null,
+  "runner": false,
+  "items": [
+    {
+      "id": "episode-id",
+      "show_id": "show-...",
+      "show_title": "知行小酒馆",
+      "title": "单集标题",
+      "status": "pending",
+      "progress": 0,
+      "enabled": true,
+      "task_id": null
+    }
+  ]
+}
+```
+
+认证除了转写 API Token，也接受平台 Owner Token，供本机 `yuxun ps` 读取队列。
+
 ## 列表
 
 ```http

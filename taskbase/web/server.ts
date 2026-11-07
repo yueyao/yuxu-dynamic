@@ -198,18 +198,39 @@ export function createWebServer(options: WebServerOptions): Server {
     }
   }
 
-  function transcriptApiAuthorized(request: IncomingMessage): boolean {
-    if (!transcriptApiToken) return false;
+  async function publicApiAuthorized(request: IncomingMessage): Promise<boolean> {
     const header = request.headers.authorization;
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
-    const provided = Buffer.from(header.slice(7));
-    const expected = Buffer.from(transcriptApiToken);
-    return provided.length === expected.length && timingSafeEqual(provided, expected);
+    const provided = header.slice(7);
+    if (transcriptApiToken) {
+      const left = Buffer.from(provided);
+      const right = Buffer.from(transcriptApiToken);
+      if (left.length === right.length && timingSafeEqual(left, right)) return true;
+    }
+    try {
+      await platformJson('/v1/apps', { token: provided });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async function handleTranscriptApi(response: ServerResponse, method: string,
     path: string, url: URL): Promise<void> {
     if (method !== 'GET') throw new WebError(405, 'METHOD_NOT_ALLOWED', '只支持 GET');
+    if (path === '/api/v1/queue') {
+      const titles = new Map(store.listShows().map((show) => [show.show_id, show.title]));
+      return sendJson(response, 200, {
+        counts: transcriptionQueue.counts(),
+        paused: transcriptionQueue.getState('paused') === '1',
+        error: transcriptionQueue.getState('error'),
+        runner: queueRunnerToken !== null,
+        items: transcriptionQueue.list().map((item) => ({
+          ...item,
+          show_title: titles.get(item.show_id) ?? null,
+        })),
+      });
+    }
     if (path === '/api/v1/transcripts') {
       const rawLimit = Number(url.searchParams.get('limit') ?? '20');
       const rawOffset = Number(url.searchParams.get('cursor') ?? '0');
@@ -418,11 +439,8 @@ export function createWebServer(options: WebServerOptions): Server {
         return sendJson(response, 200, { ok: true });
       }
 
-      if (path.startsWith('/api/v1/transcripts')) {
-        if (!transcriptApiToken) {
-          throw new WebError(503, 'API_DISABLED', '外部转写 API 未配置 Token');
-        }
-        if (!transcriptApiAuthorized(request)) {
+      if (path.startsWith('/api/v1/')) {
+        if (!(await publicApiAuthorized(request))) {
           throw new WebError(401, 'UNAUTHORIZED', '无效的 API Token');
         }
         return await handleTranscriptApi(response, method, path, url);
