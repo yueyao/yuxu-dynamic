@@ -14,7 +14,6 @@ yuxun status
 yuxun ps
 yuxun transcribe <audio-url>
 yuxun stop <task-id>
-yuxun batch
 yuxun worker <run|install|start|stop|status|logs|uninstall>
 yuxun doctor
 yuxun version
@@ -30,7 +29,7 @@ yuxun help --all
 
 | 分组 | 命令 | 用途 |
 | --- | --- | --- |
-| 日常 | `login`、`logout`、`status`、`ps`、`transcribe`、`stop`、`batch`、`doctor`、`version` | 人手操作 |
+| 日常 | `login`、`logout`、`status`、`ps`、`transcribe`、`stop`、`doctor`、`version` | 人手操作 |
 | Worker | `worker run/install/start/stop/status/logs/doctor/pair/uninstall` | Mac 后台转写 |
 | 任务 | `task run/history/get/result/events/logs/close/retry` | 脚本查询、排障 |
 | 平台 | `apps`、`app register/rotate-token`、`schedule ...`、`artifact download` | 应用与调度管理 |
@@ -169,43 +168,6 @@ yuxun worker stop
 yuxun worker start
 yuxun worker status
 ```
-
-### 批量转写：选择与排序
-
-默认只预览，不会提交：
-
-```sh
-yuxun batch --show 知行小酒馆 --limit 20 --order newest
-```
-
-确认后加 `--yes`：
-
-```sh
-YUXUN_PASSWORD="$(cat taskbase/.deploy/tencent-owner-password)" \
-  yuxun batch --show 知行小酒馆 --limit 20 --order newest --yes
-```
-
-筛选参数：
-
-| 参数 | 说明 |
-| --- | --- |
-| `--show` | 节目名（支持子串）或 show-id，可重复 |
-| `--episode` | 指定单集 ID，可重复 |
-| `--exclude` | 排除单集 ID，可重复 |
-| `--since` / `--until` | 发布日期范围，格式 `YYYY-MM-DD` |
-| `--order` | `newest` / `oldest` / `shortest` / `longest` / `given`（按 `--episode` 给出的顺序） |
-| `--limit` | 最多跑几集 |
-| `--include-done` | 已转写的也重新提交 |
-| `--dry-run` | 只预览 |
-| `--yes` | 真正提交 |
-
-执行规则：
-
-- `--order given` 配合重复的 `--episode`，可以自定义执行顺序
-- 默认跳过已有转写稿的单集
-- 一次只提交一集，完成后再提交下一集，避开 1 小时排队超时
-- Ctrl-C 在当前一集完成后停止
-- 连续失败 3 次自动停止
 
 ## 4. 应用与任务（高级）
 
