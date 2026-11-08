@@ -20,6 +20,7 @@
     queueSelected: new Set(),
     queueFilters: { q: '', showId: '', status: '', page: 1 },
     queueTimer: null,
+    episodeTimer: null,
     podcastTaskFilters: { status: '', type: '' },
     podcastTaskTimer: null,
   };
@@ -487,6 +488,7 @@
     if (!state.me) return;
     if (state.queueTimer) { clearTimeout(state.queueTimer); state.queueTimer = null; }
     if (state.podcastTaskTimer) { clearTimeout(state.podcastTaskTimer); state.podcastTaskTimer = null; }
+    if (state.episodeTimer) { clearTimeout(state.episodeTimer); state.episodeTimer = null; }
     const route = activeRoute();
     state.route = route;
     for (const button of document.querySelectorAll('#nav button[data-route]')) {
@@ -1081,7 +1083,8 @@
     return renderShowLibrary('candidate');
   }
 
-  async function renderEpisodes() {
+  async function renderEpisodes(preserveScroll = null) {
+    if (state.episodeTimer) { clearTimeout(state.episodeTimer); state.episodeTimer = null; }
     const filters = state.episodeFilters;
     const tab = hashParams().get('tab') === 'transcripts' ? 'transcripts' : 'episodes';
     setPageActions(actionButton('刷新', 'refresh', () => renderEpisodes()));
@@ -1089,14 +1092,22 @@
       const transcriptFilters = state.transcriptFilters;
       const params = new URLSearchParams({ limit: String(transcriptFilters.limit) });
       if (transcriptFilters.q) params.set('q', transcriptFilters.q);
-      const data = await transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [], total: 0 }));
+      const [data, queueData] = await Promise.all([
+        transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [], total: 0 })),
+        transcription('/queue').catch(() => null),
+      ]);
       const transcripts = data.transcripts || [];
       clear(content);
       content.append(episodeTabs('transcripts'));
       renderTranscriptHistory(transcripts, data.total ?? transcripts.length);
+      if (preserveScroll !== null) window.scrollTo(0, preserveScroll);
+      scheduleEpisodeRefresh(queueData, preserveScroll);
       return;
     }
-    const showsData = await podcast('/shows').catch(() => ({ shows: [] }));
+    const [showsData, queueData] = await Promise.all([
+      podcast('/shows').catch(() => ({ shows: [] })),
+      transcription('/queue').catch(() => null),
+    ]);
     const shows = showsData.shows || [];
     const params = new URLSearchParams({
       limit: String(filters.limit),
@@ -1227,6 +1238,26 @@
             class: 'btn btn-sm', type: 'button', disabled: page >= totalPages,
             onClick: () => { filters.page = page + 1; renderEpisodes(); },
           }, '下一页')))));
+    if (preserveScroll !== null) window.scrollTo(0, preserveScroll);
+    scheduleEpisodeRefresh(queueData, preserveScroll);
+  }
+
+  function scheduleEpisodeRefresh(queueData, preserveScroll) {
+    if (!queueData) return;
+    const counts = queueData.counts || {};
+    if ((counts.running || 0) === 0 && (counts.pending || 0) === 0) return;
+    state.episodeTimer = setTimeout(() => {
+      if (state.route !== 'episodes') return;
+      if (document.hidden) {
+        scheduleEpisodeRefresh(queueData, preserveScroll);
+        return;
+      }
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
+        scheduleEpisodeRefresh(queueData, preserveScroll);
+        return;
+      }
+      renderEpisodes(window.scrollY);
+    }, 15000);
   }
 
   function openEpisodeLibraryItem(episode) {
