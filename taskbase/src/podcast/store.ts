@@ -27,6 +27,13 @@ export type PodcastShow = {
   updated_at: string;
 };
 
+export type EpisodeLibraryItem = PodcastEpisode & {
+  show_title: string;
+  collected_at: string;
+  transcript_id: string | null;
+  transcript_created_at: string | null;
+};
+
 export type PodcastEpisode = {
   episode_id: string;
   show_id: string;
@@ -79,6 +86,7 @@ type EpisodeRow = {
   id: string; show_id: string; source: string; source_id: string; title: string;
   description: string | null; published_at: string | null; duration_seconds: number | null;
   audio_url: string | null; image_url: string | null;
+  created_at: number; updated_at: number;
 };
 
 type RunRow = {
@@ -469,6 +477,90 @@ export class PodcastStore {
       audio_url: row.audio_url,
       image_url: row.image_url,
     }));
+  }
+
+  listEpisodeLibrary(options: {
+    q?: string;
+    showId?: string;
+    since?: string;
+    until?: string;
+    source?: string;
+    transcript?: 'done' | 'pending';
+    sort?: 'published_at' | 'created_at' | 'show_title';
+    order?: 'asc' | 'desc';
+    limit?: number;
+    offset?: number;
+  } = {}): {
+    episodes: EpisodeLibraryItem[];
+    total: number;
+    summary: { total: number; transcribed: number };
+  } {
+    const hasTranscripts = Boolean(this.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcription_transcripts'",
+    ).get());
+    const where = ['1 = 1'];
+    const args: Array<string | number> = [];
+    if (options.showId) { where.push('e.show_id = ?'); args.push(options.showId); }
+    if (options.source === 'rss' || options.source === 'page') {
+      where.push('e.source = ?'); args.push(options.source);
+    }
+    if (options.since) { where.push('substr(e.published_at, 1, 10) >= ?'); args.push(options.since); }
+    if (options.until) { where.push('substr(e.published_at, 1, 10) <= ?'); args.push(options.until); }
+    const q = options.q?.trim();
+    if (q) {
+      const like = `%${q}%`;
+      where.push('(e.title LIKE ? OR e.id LIKE ? OR s.title LIKE ?)');
+      args.push(like, like, like);
+    }
+    if (hasTranscripts && options.transcript === 'done') {
+      where.push('EXISTS (SELECT 1 FROM transcription_transcripts t WHERE t.episode_id = e.id)');
+    } else if (hasTranscripts && options.transcript === 'pending') {
+      where.push('NOT EXISTS (SELECT 1 FROM transcription_transcripts t WHERE t.episode_id = e.id)');
+    }
+    const from = `FROM podcast_episodes e JOIN podcast_shows s ON s.id = e.show_id`;
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const totalRow = this.db.prepare(`SELECT COUNT(*) AS count ${from} ${whereSql}`).get(...args) as { count: number };
+    const summaryTotal = (this.db.prepare('SELECT COUNT(*) AS count FROM podcast_episodes').get() as { count: number }).count;
+    const summaryTranscribed = hasTranscripts
+      ? (this.db.prepare('SELECT COUNT(DISTINCT episode_id) AS count FROM transcription_transcripts WHERE episode_id IS NOT NULL')
+        .get() as { count: number }).count
+      : 0;
+    const sort = options.sort === 'created_at' || options.sort === 'show_title' ? options.sort : 'published_at';
+    const direction = options.order === 'asc' ? 'ASC' : 'DESC';
+    const orderBy = sort === 'show_title'
+      ? `s.title COLLATE NOCASE ${direction}, e.published_at IS NULL, e.published_at DESC, e.id ${direction}`
+      : sort === 'created_at'
+        ? `e.created_at ${direction}, e.id ${direction}`
+        : `e.published_at IS NULL, e.published_at ${direction}, e.id ${direction}`;
+    const limit = Number.isSafeInteger(options.limit) ? Math.min(Math.max(options.limit ?? 50, 1), 100) : 50;
+    const offset = Number.isSafeInteger(options.offset) ? Math.max(options.offset ?? 0, 0) : 0;
+    const transcriptColumns = hasTranscripts
+      ? `(SELECT t.id FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY t.created_at DESC LIMIT 1) AS transcript_id,
+         (SELECT t.created_at FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY t.created_at DESC LIMIT 1) AS transcript_created_at`
+      : 'NULL AS transcript_id, NULL AS transcript_created_at';
+    const rows = this.db.prepare(`SELECT e.*, s.title AS show_title, ${transcriptColumns}
+      ${from} ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(...args, limit, offset) as
+      Array<EpisodeRow & { show_title: string; transcript_id: string | null; transcript_created_at: number | null }>;
+    return {
+      episodes: rows.map((row) => ({
+        episode_id: row.id,
+        show_id: row.show_id,
+        show_title: row.show_title,
+        source: row.source,
+        source_id: row.source_id,
+        title: row.title,
+        description: row.description,
+        published_at: row.published_at,
+        duration_seconds: row.duration_seconds,
+        audio_url: row.audio_url,
+        image_url: row.image_url,
+        collected_at: new Date(row.created_at).toISOString(),
+        transcript_id: row.transcript_id,
+        transcript_created_at: iso(row.transcript_created_at),
+      })),
+      total: totalRow.count,
+      summary: { total: summaryTotal, transcribed: summaryTranscribed },
+    };
   }
 
   getEpisode(episodeId: string): (PodcastEpisode & { show_title: string | null }) | null {

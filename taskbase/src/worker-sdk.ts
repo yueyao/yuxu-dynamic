@@ -58,7 +58,7 @@ export class WorkerClient {
     this.options = options;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}, timeoutMs?: number): Promise<T> {
     const response = await (this.options.fetchImpl ?? fetch)(new URL(path, this.options.baseUrl), {
       ...init,
       headers: {
@@ -66,7 +66,7 @@ export class WorkerClient {
         ...(typeof init.body === 'string' ? { 'content-type': 'application/json' } : {}),
         ...init.headers,
       },
-      signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 30_000),
+      signal: AbortSignal.timeout(timeoutMs ?? this.options.requestTimeoutMs ?? 30_000),
     });
     if (response.status === 204) return null as T;
     const data = await response.json() as Record<string, unknown>;
@@ -96,14 +96,14 @@ export class WorkerClient {
     await this.request(`/v1/worker/tasks/${lease.task_id}/progress`, {
       method: 'POST', headers: this.attemptHeaders(lease),
       body: JSON.stringify({ progress: percent, message }),
-    });
+    }, 60_000);
   }
 
   async log(lease: WorkerLease, level: 'debug' | 'info' | 'warn' | 'error', message: string): Promise<void> {
     await this.request(`/v1/worker/tasks/${lease.task_id}/logs`, {
       method: 'POST', headers: this.attemptHeaders(lease),
       body: JSON.stringify({ level, message }),
-    });
+    }, 60_000);
   }
 
   stepValue<T>(lease: WorkerLease, key: string): T | undefined {
@@ -114,7 +114,7 @@ export class WorkerClient {
     await this.request(`/v1/worker/tasks/${lease.task_id}/steps`, {
       method: 'POST', headers: this.attemptHeaders(lease),
       body: JSON.stringify({ step_key: key, value }),
-    });
+    }, 120_000);
     lease.steps[key] = value;
   }
 
@@ -125,7 +125,7 @@ export class WorkerClient {
         method: 'PUT',
         headers: { ...this.attemptHeaders(lease), 'content-type': contentType },
         body: data as BodyInit,
-      });
+      }, 120_000);
     return response.artifact_id;
   }
 
@@ -133,7 +133,7 @@ export class WorkerClient {
     await this.request(`/v1/worker/tasks/${lease.task_id}/complete`, {
       method: 'POST', headers: this.attemptHeaders(lease),
       body: JSON.stringify({ output }),
-    });
+    }, 180_000);
   }
 
   async fail(lease: WorkerLease, message: string): Promise<void> {

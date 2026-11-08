@@ -858,6 +858,56 @@ export function createWebServer(options: WebServerOptions): Server {
       return sendJson(response, 200, { shows: store.listShows() });
     }
 
+    if (method === 'GET' && path === '/api/podcast/episodes') {
+      const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+      const since = url.searchParams.get('since') || undefined;
+      const until = url.searchParams.get('until') || undefined;
+      if ((since && !datePattern.test(since)) || (until && !datePattern.test(until))) {
+        throw new WebError(400, 'INVALID_DATE', '日期格式必须是 YYYY-MM-DD');
+      }
+      const transcriptValue = url.searchParams.get('transcript');
+      const transcript = transcriptValue === 'done' || transcriptValue === 'pending' ? transcriptValue : undefined;
+      const sourceValue = url.searchParams.get('source');
+      const source = sourceValue === 'rss' || sourceValue === 'page' ? sourceValue : undefined;
+      const sortValue = url.searchParams.get('sort');
+      const sort = sortValue === 'created_at' || sortValue === 'show_title' ? sortValue : 'published_at';
+      const order = url.searchParams.get('order') === 'asc' ? 'asc' : 'desc';
+      const limit = Number(url.searchParams.get('limit') || 50);
+      const offset = Number(url.searchParams.get('offset') || 0);
+      const result = store.listEpisodeLibrary({
+        q: url.searchParams.get('q') || undefined,
+        showId: url.searchParams.get('show_id') || undefined,
+        since,
+        until,
+        source,
+        transcript,
+        sort,
+        order,
+        limit: Number.isFinite(limit) ? limit : 50,
+        offset: Number.isFinite(offset) ? offset : 0,
+      });
+      return sendJson(response, 200, {
+        total: result.total,
+        summary: {
+          total: result.summary.total,
+          transcribed: result.summary.transcribed,
+          untranscribed: result.summary.total - result.summary.transcribed,
+        },
+        limit: Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 100) : 50,
+        offset: Number.isFinite(offset) ? Math.max(Math.trunc(offset), 0) : 0,
+        episodes: result.episodes.map((episode) => {
+          const { transcript_id, transcript_created_at, ...rest } = episode;
+          return {
+            ...rest,
+            collected: true,
+            transcript: transcript_id
+              ? { transcript_id, created_at: transcript_created_at }
+              : null,
+          };
+        }),
+      });
+    }
+
     if (method === 'GET' && path === '/api/podcast/runs') {
       return sendJson(response, 200, { runs: store.listRuns(undefined, 20) });
     }
@@ -968,7 +1018,7 @@ export function createWebServer(options: WebServerOptions): Server {
       const body = await readJson(request);
       const showIds = Array.isArray(body.show_ids)
         ? body.show_ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
-        : store.listShows().map((show) => show.show_id);
+        : store.listShows().filter((show) => !show.archived_at).map((show) => show.show_id);
       if (showIds.length === 0) throw new WebError(400, 'NO_SHOWS', '还没有可采集的节目');
       const since = optionalDate(body, 'since');
       const until = optionalDate(body, 'until');

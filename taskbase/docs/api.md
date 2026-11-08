@@ -19,7 +19,7 @@ Token 来源：
 | 本机 `taskbase/.deploy/transcript-api-token` | 原始 Token |
 | 服务端 `/etc/taskbase/web.env` | `TASKBASE_TRANSCRIPT_API_TOKEN` |
 
-未配置 Token 时接口返回 `503 API_DISABLED`；Token 错误返回 `401 UNAUTHORIZED`。
+Token 错误返回 `401 UNAUTHORIZED`；平台 Owner Token 也可以用于只读查询队列和转写稿。
 
 ## 转写队列
 

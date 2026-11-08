@@ -69,6 +69,12 @@ test('播客表：新增、元数据、单集 upsert 与记录', async () => {
     ]);
     assert.deepEqual(second, { inserted: 1, updated: 1 });
     assert.equal(store.listEpisodes(show.show_id).length, 2);
+    const libraryByShow = store.listEpisodeLibrary({ q: '正式标题', limit: 10 });
+    assert.equal(libraryByShow.total, 2);
+    assert.equal(libraryByShow.episodes[0].show_title, '正式标题');
+    assert.equal(libraryByShow.episodes.every((episode) => episode.transcript_id === null), true);
+    assert.equal(store.listEpisodeLibrary({ showId: show.show_id, limit: 10 }).total, 2);
+    assert.equal(store.listEpisodeLibrary({ sort: 'show_title', limit: 1 }).episodes.length, 1);
     store.markSync(show.show_id, { status: 'partial', coverageStatus: 'partial' });
     store.recordRun({
       taskId: 'task-1', showId: show.show_id, since: '2026-01-01', until: '2026-12-31',

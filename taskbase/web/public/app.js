@@ -11,6 +11,11 @@
     selectedShowIds: new Set(),
     selectedCandidateIds: new Set(),
     showArchivedCandidates: false,
+    libraryCounts: { active: 0, candidate: 0 },
+    episodeFilters: {
+      q: '', showId: '', since: '', until: '', transcript: '', source: '',
+      sort: 'published_at', order: 'desc', page: 1, limit: 50,
+    },
     transcriptFilters: { q: '', limit: 20 },
     transcribeTab: 'queue',
     queueSelected: new Set(),
@@ -22,13 +27,12 @@
 
   const routes = {
     overview: { title: '总览', subtitle: '平台与播客任务运行概况', render: renderOverview },
-    tasks: { title: '任务', subtitle: '提交、执行、关闭与重试', render: renderTasks },
+    tasks: { title: '任务', subtitle: '转写任务与采集任务', render: renderTaskHub },
+    'tasks-all': { title: '全部任务', subtitle: '提交、执行、关闭与重试', render: renderTasks },
     apps: { title: '应用', subtitle: '任务定义与 Worker 凭据', render: renderApps },
     schedules: { title: '调度', subtitle: 'cron 调度、下次触发与运行历史', render: renderSchedules },
-    'podcast-shows': { title: '节目库', subtitle: '已采集节目、单集与一年范围更新', render: renderPodcastShows },
-    'podcast-candidates': { title: '候选节目', subtitle: '尚未首次采集的备选节目', render: renderPodcastCandidates },
-    'transcribe-queue': { title: '转写', subtitle: '队列、顺序与已入库转写稿', render: renderTranscribeQueue },
-    'podcast-tasks': { title: '采集任务', subtitle: '播客任务列表与结果', render: renderPodcastTasks },
+    'podcast-shows': { title: '内容库', subtitle: '节目库与候选节目', render: renderPodcastShows },
+    episodes: { title: '单集库', subtitle: '按时间、播客和转写状态浏览所有单集', render: renderEpisodes },
     transcript: { title: '转写稿', subtitle: '在 Web 中阅读转写 Markdown', render: renderTranscript },
   };
 
@@ -393,7 +397,8 @@
       state.me = result;
       showApp();
       await loadApps(true);
-      if (!location.hash || (!routes[location.hash.replace(/^#\/?/, '')] && !transcriptEpisodeId())) {
+      const initial = location.hash.replace(/^#\/?/, '').split('?')[0];
+      if (!location.hash || (!routes[initial] && !ROUTE_ALIASES[initial] && !transcriptEpisodeId())) {
         history.replaceState(null, '', '#/overview');
       }
       await renderCurrent();
@@ -416,15 +421,55 @@
     return match ? decodeURIComponent(match[1]) : null;
   }
 
+  const ROUTE_ALIASES = {
+    'podcast-candidates': 'podcast-shows?tab=candidate',
+    'transcribe-queue': 'tasks?tab=transcribe',
+    'podcast-tasks': 'tasks?tab=collect',
+  };
+
+  function hashParams() {
+    const query = location.hash.split('?')[1] || '';
+    return new URLSearchParams(query);
+  }
+
   function activeRoute() {
     if (transcriptEpisodeId()) return 'transcript';
-    const route = location.hash.replace(/^#\/?/, '');
-    return routes[route] ? route : 'overview';
+    const raw = location.hash.replace(/^#\/?/, '').split('?')[0];
+    if (ROUTE_ALIASES[raw]) {
+      history.replaceState(null, '', `#/${ROUTE_ALIASES[raw]}`);
+      return ROUTE_ALIASES[raw].split('?')[0];
+    }
+    return routes[raw] ? raw : 'overview';
   }
 
   function navigate(route) {
     if (location.hash === `#/${route}`) renderCurrent();
     else location.hash = `#/${route}`;
+  }
+
+  function contentTabs(active) {
+    const counts = state.libraryCounts || {};
+    return el('div', { class: 'tabs content-tabs' },
+      el('button', {
+        type: 'button', class: `tab ${active ? 'active' : ''}`,
+        onClick: () => navigate('podcast-shows'),
+      }, `节目库 ${counts.active || 0}`),
+      el('button', {
+        type: 'button', class: `tab ${active ? '' : 'active'}`,
+        onClick: () => navigate('podcast-shows?tab=candidate'),
+      }, `候选节目 ${counts.candidate || 0}`));
+  }
+
+  function taskTabs(active) {
+    return el('div', { class: 'tabs task-tabs' },
+      el('button', {
+        type: 'button', class: `tab ${active === 'transcribe' ? 'active' : ''}`,
+        onClick: () => navigate('tasks?tab=transcribe'),
+      }, '转写任务'),
+      el('button', {
+        type: 'button', class: `tab ${active === 'collect' ? 'active' : ''}`,
+        onClick: () => navigate('tasks?tab=collect'),
+      }, '采集任务'));
   }
 
   async function renderCurrent() {
@@ -637,6 +682,8 @@
     const tasks = tasksData.tasks || [];
     const schedules = schedulesData.schedules || [];
     const shows = showsData ? showsData.shows || [] : [];
+    const activeShows = shows.filter(isPulledShow);
+    const candidateShows = shows.filter((show) => !isPulledShow(show) && !show.archived_at);
     const running = tasks.filter((task) => task.status === 'running').length;
     const queued = tasks.filter((task) => task.status === 'queued').length;
     const queueCounts = queueData ? queueData.counts || {} : {};
@@ -655,10 +702,10 @@
       el('div', { class: 'hero-copy' },
         el('span', { class: 'eyebrow light' }, 'PODCAST OPS · DAILY BRIEF'),
         el('h2', {}, `${greeting}，${state.me ? state.me.username : 'owner'}`),
-        el('p', {}, `今天有 ${running + queueRunning} 个任务执行中、${queued + queuePending} 个排队；播客库已收录 ${podcastData ? podcastData.shows : shows.length} 个节目、${podcastData ? podcastData.episodes : 0} 条单集。`),
+        el('p', {}, `今天有 ${running + queueRunning} 个任务执行中、${queued + queuePending} 个排队；节目库 ${activeShows.length} 个、候选 ${candidateShows.length} 个，共 ${podcastData ? podcastData.episodes : 0} 条单集。`),
         el('div', { class: 'hero-actions' },
           actionButton('打开节目库', 'mic', () => navigate('podcast-shows'), 'btn btn-primary'),
-          actionButton('转写队列', 'layers', () => navigate('transcribe-queue'), 'btn btn-on-dark'),
+          actionButton('转写队列', 'layers', () => navigate('tasks?tab=transcribe'), 'btn btn-on-dark'),
           actionButton('新建采集', 'plus', () => openCollectModal(), 'btn btn-on-dark'))),
       el('div', { class: 'hero-panel' },
         el('div', { class: 'hero-panel-head' }, el('span', {}, 'SYSTEM PULSE'), el('span', { class: 'dot green' })),
@@ -677,22 +724,22 @@
     content.append(el('div', { class: 'stats-grid' },
       statCard('执行中', running + queueRunning, '平台任务 + 转写队列', 'activity', 'amber'),
       statCard('排队', queued + queuePending, '平台任务 + 转写队列', 'clock', 'blue'),
-      statCard('播客节目', podcastData ? podcastData.shows : '—', `${partial} 个不完整`, 'mic', 'green'),
+      statCard('节目库', activeShows.length, `候选 ${candidateShows.length} 个`, 'mic', 'green'),
       statCard('已入库单集', podcastData ? podcastData.episodes : '—', '仅列表元数据', 'layers', 'purple')));
 
     const recentCard = el('section', { class: 'card' },
       el('div', { class: 'card-head' },
         el('div', {}, el('div', { class: 'card-title' }, '最近任务'), el('div', { class: 'card-sub' }, '点击行查看事件、日志和结果')),
-        el('button', { class: 'card-link', type: 'button', onClick: () => navigate('tasks') }, '全部任务', icon('arrow'))),
+        el('button', { class: 'card-link', type: 'button', onClick: () => navigate('tasks-all') }, '全部任务', icon('arrow'))),
       el('div', { class: 'card-body flush' }, tasksTable(tasks.slice(0, 6))));
 
-    const snapshot = shows.length
-      ? el('div', { class: 'snapshot-list' }, shows.slice(0, 3).map((show) => el('div', { class: 'snapshot-row' },
+    const snapshot = activeShows.length
+      ? el('div', { class: 'snapshot-list' }, activeShows.slice(0, 3).map((show) => el('div', { class: 'snapshot-row' },
           showCover(show),
           el('div', { class: 'snapshot-body' },
             el('div', { class: 'snapshot-title' }, show.title),
             el('div', { class: 'snapshot-meta' }, `${show.episode_count} 集 · ${show.coverage_status === 'full' ? '完整' : 'partial'}`)))))
-      : emptyState('节目库为空', '添加节目后开始采集列表。', 'mic');
+      : emptyState('节目库为空', '去候选节目做首次采集，或添加节目。', 'mic');
     const podcastCard = el('section', { class: 'card' },
       el('div', { class: 'card-head' },
         el('div', {}, el('div', { class: 'card-title' }, '播客库'), el('div', { class: 'card-sub' }, '最近纳入的节目')),
@@ -731,6 +778,12 @@
   }
 
   // ---------- 任务页 ----------
+
+  async function renderTaskHub() {
+    const tab = hashParams().get('tab') === 'collect' ? 'collect' : 'transcribe';
+    if (tab === 'collect') return renderPodcastTasks();
+    return renderTranscribeQueue();
+  }
 
   async function renderTasks() {
     await loadApps();
@@ -1003,12 +1056,178 @@
     return podcast('/overview');
   }
 
+  function isPulledShow(show) {
+    return Boolean(show.last_sync_at)
+      && (show.episode_count > 0 || show.last_sync_status === 'succeeded' || show.last_sync_status === 'partial');
+  }
+
   async function renderPodcastShows() {
-    return renderShowLibrary('active');
+    const tab = hashParams().get('tab') === 'candidate' ? 'candidate' : 'active';
+    return renderShowLibrary(tab);
   }
 
   async function renderPodcastCandidates() {
     return renderShowLibrary('candidate');
+  }
+
+  async function renderEpisodes() {
+    const filters = state.episodeFilters;
+    setPageActions(actionButton('刷新', 'refresh', () => renderEpisodes()));
+    const showsData = await podcast('/shows').catch(() => ({ shows: [] }));
+    const shows = showsData.shows || [];
+    const params = new URLSearchParams({
+      limit: String(filters.limit),
+      offset: String(Math.max(0, (filters.page - 1) * filters.limit)),
+      sort: filters.sort,
+      order: filters.order,
+    });
+    if (filters.q) params.set('q', filters.q);
+    if (filters.showId) params.set('show_id', filters.showId);
+    if (filters.since) params.set('since', filters.since);
+    if (filters.until) params.set('until', filters.until);
+    if (filters.transcript) params.set('transcript', filters.transcript);
+    if (filters.source) params.set('source', filters.source);
+    const data = await podcast(`/episodes?${params.toString()}`);
+    const episodes = data.episodes || [];
+    const summary = data.summary || { total: 0, transcribed: 0, untranscribed: 0 };
+    const total = data.total || 0;
+    const totalPages = Math.max(1, Math.ceil(total / filters.limit));
+    const page = Math.min(Math.max(1, filters.page), totalPages);
+    if (page !== filters.page) {
+      filters.page = page;
+      return renderEpisodes();
+    }
+    filters.page = page;
+
+    clear(content);
+    content.append(el('div', { class: 'stats-grid' },
+      statCard('单集总数', summary.total, '已采集入库', 'layers', 'blue'),
+      statCard('已转写', summary.transcribed, '有转写稿', 'check', 'green'),
+      statCard('未转写', summary.untranscribed, '可加入队列', 'mic', 'amber'),
+      statCard('当前结果', total, filters.page > 1 ? `第 ${page} 页` : '按筛选条件', 'database', 'purple')));
+
+    const search = el('input', {
+      class: 'input', value: filters.q, placeholder: '搜索播客名 / 单集标题 / episode id',
+      onKeydown: (event) => { if (event.key === 'Enter') { filters.q = event.target.value.trim(); filters.page = 1; renderEpisodes(); } },
+    });
+    const showSelect = el('select', {
+      class: 'select',
+      onChange: (event) => { filters.showId = event.target.value; filters.page = 1; renderEpisodes(); },
+    }, option('', '全部播客', !filters.showId),
+      shows.map((show) => option(show.show_id, show.title, filters.showId === show.show_id)));
+    const since = el('input', {
+      class: 'input', type: 'date', value: filters.since,
+      onChange: (event) => { filters.since = event.target.value; filters.page = 1; renderEpisodes(); },
+    });
+    const until = el('input', {
+      class: 'input', type: 'date', value: filters.until,
+      onChange: (event) => { filters.until = event.target.value; filters.page = 1; renderEpisodes(); },
+    });
+    const transcriptSelect = el('select', {
+      class: 'select',
+      onChange: (event) => { filters.transcript = event.target.value; filters.page = 1; renderEpisodes(); },
+    }, option('', '全部转写状态', !filters.transcript),
+      option('done', '已转写', filters.transcript === 'done'),
+      option('pending', '未转写', filters.transcript === 'pending'));
+    const sourceSelect = el('select', {
+      class: 'select',
+      onChange: (event) => { filters.source = event.target.value; filters.page = 1; renderEpisodes(); },
+    }, option('', '全部来源', !filters.source),
+      option('rss', 'RSS', filters.source === 'rss'),
+      option('page', '公开页', filters.source === 'page'));
+    const sortSelect = el('select', {
+      class: 'select',
+      onChange: (event) => { filters.sort = event.target.value; filters.page = 1; renderEpisodes(); },
+    }, option('published_at', '按发布时间', filters.sort === 'published_at'),
+      option('created_at', '按入库时间', filters.sort === 'created_at'),
+      option('show_title', '按播客名', filters.sort === 'show_title'));
+    const orderSelect = el('select', {
+      class: 'select',
+      onChange: (event) => { filters.order = event.target.value; filters.page = 1; renderEpisodes(); },
+    }, option('desc', '新 → 旧', filters.order === 'desc'),
+      option('asc', '旧 → 新', filters.order === 'asc'));
+    const reset = actionButton('重置', 'x', () => {
+      state.episodeFilters = {
+        q: '', showId: '', since: '', until: '', transcript: '', source: '',
+        sort: 'published_at', order: 'desc', page: 1, limit: 50,
+      };
+      renderEpisodes();
+    }, 'btn btn-sm');
+
+    const rows = episodes.map((episode) => [
+      el('div', { class: 'nowrap' }, fmtDateTime(episode.published_at)),
+      el('div', {},
+        el('div', { class: 'title-cell' }, episode.show_title || '—'),
+        el('div', { class: 'sub' }, shortId(episode.show_id))),
+      el('div', { class: 'title-cell' }, episode.title),
+      el('span', { class: 'nowrap' }, fmtDuration(episode.duration_seconds)),
+      el('div', {},
+        el('span', { class: 'badge badge-succeeded' }, '采集成功'),
+        el('div', { class: 'sub' }, fmtDateTime(episode.collected_at))),
+      el('div', {},
+        episode.transcript
+          ? el('div', {}, el('span', { class: 'badge badge-succeeded' }, '转写成功'),
+              el('div', { class: 'sub' }, fmtDateTime(episode.transcript.created_at)))
+          : el('span', { class: 'badge' }, '未转写')),
+      el('div', { class: 'row-actions' },
+        actionButton('查看', 'tasks', () => openEpisodeLibraryItem(episode), 'btn btn-sm'),
+        episode.transcript
+          ? actionButton('转写稿', 'arrow', () => navigate(`transcript/${encodeURIComponent(episode.episode_id)}`), 'btn btn-sm')
+          : actionButton('加入转写', 'mic', () => transcribeEpisode(episode), 'btn btn-sm btn-primary')),
+    ]);
+
+    content.append(el('section', { class: 'card' },
+      el('div', { class: 'card-head' },
+        el('div', {},
+          el('div', { class: 'card-title' }, '单集库'),
+          el('div', { class: 'card-sub' }, `共 ${total} 条；搜索播客名可查看该播客下所有单集`)),
+        el('div', { class: 'row-actions' },
+          el('button', {
+            class: 'btn btn-sm', type: 'button',
+            onClick: () => { filters.q = search.value.trim(); filters.page = 1; renderEpisodes(); },
+          }, '查询'),
+          reset)),
+      el('div', { class: 'card-body flush' },
+        el('div', { class: 'queue-filter-bar' },
+          search, showSelect, since, until, transcriptSelect, sourceSelect, sortSelect, orderSelect),
+        episodes.length
+          ? table(['发布时间', '播客', '单集', '时长', '采集状态', '转写状态', '操作'], rows)
+          : emptyState('没有匹配的单集', '调整搜索、播客或时间范围后重试。', 'layers'),
+        el('div', { class: 'queue-pagination' },
+          el('button', {
+            class: 'btn btn-sm', type: 'button', disabled: page <= 1,
+            onClick: () => { filters.page = page - 1; renderEpisodes(); },
+          }, '上一页'),
+          el('span', { class: 'hint' }, `第 ${page} / ${totalPages} 页 · 共 ${total} 条`),
+          el('button', {
+            class: 'btn btn-sm', type: 'button', disabled: page >= totalPages,
+            onClick: () => { filters.page = page + 1; renderEpisodes(); },
+          }, '下一页')))));
+  }
+
+  function openEpisodeLibraryItem(episode) {
+    const close = showModal({
+      title: episode.title,
+      subtitle: episode.show_title || shortId(episode.show_id),
+      wide: true,
+      body: [
+        kv([
+          ['发布时间', fmtDateTime(episode.published_at)],
+          ['采集时间', fmtDateTime(episode.collected_at)],
+          ['时长', fmtDuration(episode.duration_seconds)],
+          ['来源', episode.source === 'rss' ? 'RSS' : '公开页'],
+          ['转写状态', episode.transcript ? `已转写 · ${fmtDateTime(episode.transcript.created_at)}` : '未转写'],
+          ['音频地址', episode.audio_url || '—'],
+        ]),
+        episode.description ? el('p', { class: 'muted' }, episode.description) : null,
+      ],
+      actions: [
+        { label: '关闭', onClick: () => close() },
+        episode.transcript
+          ? { label: '查看转写稿', class: 'btn-primary', onClick: () => { close(); navigate(`transcript/${encodeURIComponent(episode.episode_id)}`); } }
+          : { label: '加入转写队列', class: 'btn-primary', onClick: async () => { close(); await transcribeEpisode(episode); } },
+      ],
+    });
   }
 
   async function renderShowLibrary(mode) {
@@ -1021,12 +1240,13 @@
       active ? podcast('/runs').catch(() => ({ runs: [] })) : Promise.resolve({ runs: [] }),
     ]);
     const allShows = showsData.shows || [];
-    const candidates = allShows.filter((show) => !show.last_sync_at && !show.archived_at);
-    const archivedCandidates = allShows.filter((show) => !show.last_sync_at && Boolean(show.archived_at));
-    const activeShows = allShows.filter((show) => Boolean(show.last_sync_at));
+    const candidates = allShows.filter((show) => !isPulledShow(show) && !show.archived_at);
+    const archivedCandidates = allShows.filter((show) => !isPulledShow(show) && Boolean(show.archived_at));
+    const activeShows = allShows.filter(isPulledShow);
     const shows = active
       ? activeShows
       : (state.showArchivedCandidates ? [...candidates, ...archivedCandidates] : candidates);
+    state.libraryCounts = { active: activeShows.length, candidate: candidates.length };
     const runs = runsData.runs || [];
 
     const actions = [actionButton('刷新', 'refresh', rerender)];
@@ -1204,7 +1424,7 @@
       content.append(el('section', { class: 'card' },
         el('div', { class: 'card-head' },
           el('div', {}, el('div', { class: 'card-title' }, '最近采集'), el('div', { class: 'card-sub' }, '跨节目的最近运行记录')),
-          el('button', { class: 'card-link', type: 'button', onClick: () => navigate('podcast-tasks') }, '查看任务', icon('arrow'))),
+          el('button', { class: 'card-link', type: 'button', onClick: () => navigate('tasks?tab=collect') }, '查看任务', icon('arrow'))),
         el('div', { class: 'card-body flush' }, runs.length ? table(['时间', '节目', '状态', '区间', '新增 / 更新', '错误'], runs.map((run) => [
           el('span', { class: 'nowrap' }, fmtDateTime(run.started_at)),
           el('div', {}, el('div', { class: 'title-cell' }, run.show_title || '—'), el('div', { class: 'sub' }, run.show_id ? shortId(run.show_id) : '—')),
@@ -1214,6 +1434,7 @@
           run.error ? el('span', { title: run.error, style: 'color:var(--red)' }, '有错误') : '—',
         ])) : emptyState('还没有采集记录', '同步节目后会在这里显示每次运行结果。', 'clock'))));
     }
+    content.prepend(contentTabs(active));
   }
 
   async function setArchivedShow(show, archived) {
@@ -1306,7 +1527,8 @@
       transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [] })),
     ]);
     const items = data.items || [];
-    const queueItems = items.filter((item) => !['done', 'canceled'].includes(item.status));
+    const queueItems = items.filter((item) => item.status !== 'done');
+    const activeQueueCount = queueItems.filter((item) => item.status !== 'canceled').length;
     const counts = data.counts || {};
     const transcripts = transcriptData.transcripts || [];
     const transcriptTotal = transcriptData.total ?? transcripts.length;
@@ -1314,6 +1536,7 @@
     for (const id of [...state.queueSelected]) if (!validIds.has(id)) state.queueSelected.delete(id);
 
     clear(content);
+    content.append(taskTabs('transcribe'));
     content.append(el('div', { class: 'stats-grid' },
       statCard('待转写', counts.pending || 0, '按队列顺序执行', 'layers', 'blue'),
       statCard('运行中', counts.running || 0, data.runner ? '队列已启动' : '尚未启动', 'play', 'green'),
@@ -1329,7 +1552,7 @@
       el('button', {
         type: 'button', class: `tab ${state.transcribeTab === 'queue' ? 'active' : ''}`,
         onClick: () => { state.transcribeTab = 'queue'; renderTranscribeQueue(); },
-      }, `转写队列 ${queueItems.length}`),
+      }, `转写队列 ${activeQueueCount}`),
       el('button', {
         type: 'button', class: `tab ${state.transcribeTab === 'history' ? 'active' : ''}`,
         onClick: () => { state.transcribeTab = 'history'; renderTranscribeQueue(); },
@@ -1345,7 +1568,11 @@
     const keyword = queueFilters.q.trim().toLowerCase();
     const filteredQueue = queueItems.filter((item) => {
       if (queueFilters.showId && item.show_id !== queueFilters.showId) return false;
-      if (queueFilters.status && item.status !== queueFilters.status) return false;
+      if (queueFilters.status) {
+        if (item.status !== queueFilters.status) return false;
+      } else if (item.status === 'canceled') {
+        return false;
+      }
       if (keyword && !`${item.title} ${item.show_title || ''} ${item.id}`.toLowerCase().includes(keyword)) return false;
       return true;
     });
@@ -1389,7 +1616,8 @@
     }, option('', '全部状态', !queueFilters.status),
       option('pending', '待转写', queueFilters.status === 'pending'),
       option('running', '运行中', queueFilters.status === 'running'),
-      option('failed', '失败', queueFilters.status === 'failed'));
+      option('failed', '失败', queueFilters.status === 'failed'),
+      option('canceled', '已取消', queueFilters.status === 'canceled'));
     const queueSearch = el('input', {
       class: 'input', value: queueFilters.q, placeholder: '搜索播客或单集',
       onKeydown: (event) => {
@@ -1426,7 +1654,7 @@
       el('div', {},
         el('div', { class: 'card-title' }, '转写队列'),
         el('div', { class: 'card-sub' },
-          `显示 ${filteredQueue.length}/${queueItems.length} 项，已完成 ${counts.done || 0} 项；Web 负责选择与顺序，Worker 只执行平台下发的任务`)),
+          `显示 ${filteredQueue.length}/${activeQueueCount} 项，已完成 ${counts.done || 0} 项；Web 负责选择与顺序，Worker 只执行平台下发的任务`)),
       el('div', { class: 'row-actions' },
         queueStopped
           ? actionButton('开始队列', 'play', () => queueAction('start', '队列已启动'), 'btn btn-primary')
@@ -1530,7 +1758,7 @@
 
     if ((counts.running || 0) > 0 || (data.runner && (counts.pending || 0) > 0)) {
       state.queueTimer = setTimeout(() => {
-        if (state.route !== 'transcribe-queue') return;
+        if (state.route !== 'tasks') return;
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
           state.queueTimer = setTimeout(() => renderTranscribeQueue(), 5000);
           return;
@@ -1643,12 +1871,12 @@
   }
 
   function openCollectModal(preselected) {
-    const selected = preselected instanceof Set ? [...preselected] : [...state.selectedShowIds];
+    const selected = preselected instanceof Set ? [...preselected] : [];
     const since = el('input', { class: 'input', type: 'date', value: defaultSince() });
     const until = el('input', { class: 'input', type: 'date', value: today() });
     const close = showModal({
       title: '采集播客列表',
-      subtitle: selected.length ? `已选 ${selected.length} 个节目` : '将采集全部已添加节目',
+      subtitle: selected.length ? `已选 ${selected.length} 个节目` : '将采集全部未忽略节目（含候选）',
       body: [
         el('div', { class: 'form-grid' },
           el('label', { class: 'field' }, el('span', {}, '开始日期'), since),
@@ -1667,7 +1895,7 @@
             const result = await podcast('/collect', { method: 'POST', body });
             toast(`已提交采集任务 ${shortId(result.task?.task_id)}`, 'success');
             close();
-            navigate('podcast-tasks');
+            navigate('tasks?tab=collect');
           },
         },
       ],
@@ -2080,6 +2308,7 @@
     });
     const showTitles = new Map((showsData.shows || []).map((show) => [show.show_id, show.title]));
     clear(content);
+    content.append(taskTabs('collect'));
     if (!overview.app_registered) {
       content.append(el('div', { class: 'notice notice-warn' },
         el('span', {}, '播客应用尚未注册，任务无法提交。'),
@@ -2095,7 +2324,7 @@
 
     if (tasks.some((task) => task.status === 'queued' || task.status === 'running')) {
       state.podcastTaskTimer = setTimeout(() => {
-        if (state.route !== 'podcast-tasks') return;
+        if (state.route !== 'tasks') return;
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
           state.podcastTaskTimer = setTimeout(() => renderPodcastTasks(), 10000);
           return;
@@ -2131,7 +2360,8 @@
       state.me = me;
       showApp();
       await loadApps(true);
-      if (!location.hash || (!routes[location.hash.replace(/^#\/?/, '')] && !transcriptEpisodeId())) {
+      const initial = location.hash.replace(/^#\/?/, '').split('?')[0];
+      if (!location.hash || (!routes[initial] && !ROUTE_ALIASES[initial] && !transcriptEpisodeId())) {
         history.replaceState(null, '', '#/overview');
       }
       await renderCurrent();

@@ -988,3 +988,7 @@ body::before {
   gap: 10px; padding: 12px 16px; border-top: 1px solid var(--line);
 }
 .queue-pagination .hint { font-size: 11px; }
+
+/* ---------- 内容库 / 任务页 Tab ---------- */
+.content-tabs, .task-tabs { margin-bottom: 2px; }
+.episode-filter-date { width: 132px; }
