@@ -27,6 +27,8 @@ test('转写表：按 task/episode 读取', async () => {
     });
     assert.equal(updated.transcript_id, saved.transcript_id);
     assert.equal(updated.text, '更新文本');
+    assert.equal(store.listPage({ query: '测试' }).items.length, 1);
+    assert.equal(store.listPage({ query: '不存在' }).items.length, 0);
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });

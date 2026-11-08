@@ -27,6 +27,10 @@ test('解析小宇宙公开页并过滤日期', async () => {
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].title, '第一集：新内容');
   assert.throws(() => parseXiaoyuzhouShow('<html></html>', 'https://example.com'));
+
+  const defaultRange = normalizeDateRange(undefined, undefined, Date.parse('2026-11-07T00:00:00Z'));
+  assert.equal(defaultRange.since, '2025-11-07');
+  assert.equal(defaultRange.until, '2026-11-07');
 });
 
 test('播客表：新增、元数据、单集 upsert 与记录', async () => {
@@ -38,6 +42,10 @@ test('播客表：新增、元数据、单集 upsert 与记录', async () => {
     const show = store.addShow({ url, title: '测试节目' });
     assert.equal(store.getShowByUrl(url)?.show_id, show.show_id);
     assert.throws(() => store.addShow({ url }), /已经在库中/);
+    const archived = store.setArchived(show.show_id, true);
+    assert.ok(archived.archived_at);
+    assert.equal(store.overview().archived_shows, 1);
+    assert.equal(store.setArchived(show.show_id, false).archived_at, null);
 
     store.updateMetadata(show.show_id, {
       title: '正式标题', author: '作者', totalEpisodeCount: 3, pageEpisodeCount: 2, coverageStatus: 'partial',

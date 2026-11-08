@@ -127,9 +127,16 @@ export class TranscriptionQueueStore {
     return this.get(id);
   }
 
-  move(id: string, direction: 'up' | 'down'): boolean {
+  move(id: string, direction: 'up' | 'down' | 'top'): boolean {
     const current = this.get(id);
     if (!current) return false;
+    if (direction === 'top') {
+      const minimum = this.db.prepare('SELECT MIN(position) AS min FROM transcription_queue')
+        .get() as { min: number | null };
+      this.db.prepare('UPDATE transcription_queue SET position = ?, updated_at = ? WHERE id = ?')
+        .run((minimum.min ?? current.position) - 1, Date.now(), id);
+      return true;
+    }
     const neighbor = direction === 'up'
       ? this.db.prepare('SELECT * FROM transcription_queue WHERE position < ? ORDER BY position DESC LIMIT 1')
         .get(current.position)
@@ -188,6 +195,13 @@ export class TranscriptionQueueStore {
     this.db.prepare(`UPDATE transcription_queue
       SET status = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
       .run(error.slice(0, 1000), now, now, id);
+  }
+
+  markCanceled(id: string): void {
+    const now = Date.now();
+    this.db.prepare(`UPDATE transcription_queue
+      SET status = 'canceled', progress = 0, error = '已取消', finished_at = ?, updated_at = ? WHERE id = ?`)
+      .run(now, now, id);
   }
 
   retry(id: string): QueueItem | null {

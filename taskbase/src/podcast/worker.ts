@@ -38,9 +38,9 @@ function dateOnly(date: Date): string {
 export function normalizeDateRange(since?: string, until?: string, now = Date.now()): DateRange {
   const nowDate = new Date(now);
   const defaultUntil = dateOnly(nowDate);
-  const twoYearsAgo = new Date(nowDate);
-  twoYearsAgo.setUTCFullYear(twoYearsAgo.getUTCFullYear() - 2);
-  const defaultSince = dateOnly(twoYearsAgo);
+  const oneYearAgo = new Date(nowDate);
+  oneYearAgo.setUTCFullYear(oneYearAgo.getUTCFullYear() - 1);
+  const defaultSince = dateOnly(oneYearAgo);
   const sinceValue = since ?? defaultSince;
   const untilValue = until ?? defaultUntil;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(sinceValue) || !/^\d{4}-\d{2}-\d{2}$/.test(untilValue)) {

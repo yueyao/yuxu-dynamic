@@ -66,6 +66,7 @@ GET /api/v1/transcripts
 | `cursor` | 上一页返回的 `next_cursor`（数字偏移） |
 | `show_id` | 按节目过滤 |
 | `episode_id` | 按单集过滤 |
+| `q` | 搜索单集标题 / episode id |
 
 示例：
 

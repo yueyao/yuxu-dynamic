@@ -217,7 +217,7 @@ sequenceDiagram
 ```text
 Web 添加栏目（页面 URL + 可选 RSS URL）
   → Podcast Worker 领取 collect/sync 任务
-  → 有 rss_url：fetchFeed → parseFeedXml → 两年过滤 → upsert source=rss（coverage=full）
+  → 有 rss_url：fetchFeed → parseFeedXml → 一年过滤 → upsert source=rss（coverage=full）
   → 无 rss_url：抓公开页 → 解析 15 集 → upsert source=page（coverage=partial）
   → 写 podcast_ingest_runs
   → Web 展示已入库集数、RSS 总集数、覆盖状态
@@ -425,7 +425,7 @@ POST /v1/worker/tasks/:id/fail
 
 - 底座核心：任务闭环、恢复、超时、关闭/重试、产物、cron 调度。
 - Web 管理后台：总览、任务、应用、调度。
-- 播客任务后台：节目库、添加节目、两年范围采集、单节目同步、单集列表、采集记录、每节目 schedule。
+- 播客任务后台：节目库、添加节目、一年范围采集、单节目同步、单集列表、采集记录、每节目 schedule。
 - Podcast Worker：RSS 优先、小宇宙公开页回退、日期过滤、partial 标记、`podcast_` 表写入。
 - 转写应用：本地 Whisper CLI、下载/转码/segments/Markdown 产物上传；Web 单集转写和转写稿查看。
 

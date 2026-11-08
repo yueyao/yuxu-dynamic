@@ -45,6 +45,9 @@ test('转写队列：入队、排序、启停与状态流转', async (t) => {
   assert.equal(store.counts().failed, 1);
   store.retry('c');
   assert.equal(store.get('c')?.status, 'pending');
+  store.markCanceled('c');
+  assert.equal(store.get('c')?.status, 'canceled');
+  assert.equal(store.counts().canceled, 1);
 
   store.setState('paused', '1');
   assert.equal(store.getState('paused'), '1');

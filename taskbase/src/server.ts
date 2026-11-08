@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { sha256 } from './crypto.ts';
 import { PlatformError, Store, type TaskStatus } from './store.ts';
 
-const MAX_JSON_BYTES = 256 * 1024;
+const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const WORKER_ACTIONS = new Set(['heartbeat', 'progress', 'logs', 'steps', 'artifacts', 'complete', 'fail']);
 
 export type PlatformServerOptions = {

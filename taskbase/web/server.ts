@@ -5,6 +5,7 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PodcastError, PodcastStore } from '../src/podcast/store.ts';
@@ -156,7 +157,7 @@ function sendMarkdown(response: ServerResponse, filename: string, markdown: stri
 
 export function createWebServer(options: WebServerOptions): Server {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
-  const sessionTtlMs = options.sessionTtlMs ?? 12 * 60 * 60 * 1000;
+  const sessionTtlMs = options.sessionTtlMs ?? 30 * 24 * 60 * 60 * 1000;
   const cookieSecure = options.cookieSecure ?? process.env.TASKBASE_WEB_COOKIE_SECURE === '1';
   const fetchImpl = options.fetchImpl ?? fetch;
   const store = new PodcastStore(options.dbPath);
@@ -172,6 +173,48 @@ export function createWebServer(options: WebServerOptions): Server {
     ?? process.env.TASKBASE_OWNER_PASSWORD ?? '';
   const sessions = new Map<string, Session>();
   const loginAttempts = new Map<string, LoginAttempt>();
+  const sessionDb = new DatabaseSync(options.dbPath);
+  sessionDb.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 5000;
+    CREATE TABLE IF NOT EXISTS web_sessions (
+      id TEXT PRIMARY KEY,
+      token TEXT NOT NULL,
+      username TEXT NOT NULL,
+      csrf TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS web_sessions_expires ON web_sessions(expires_at);
+  `);
+
+  function saveSession(session: Session): void {
+    sessionDb.prepare(`INSERT INTO web_sessions (id, token, username, csrf, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET token = excluded.token, username = excluded.username,
+        csrf = excluded.csrf, expires_at = excluded.expires_at`).run(
+      session.id, session.token, session.username, session.csrf, session.expiresAt, Date.now(),
+    );
+  }
+
+  function loadSession(id: string): Session | null {
+    const row = sessionDb.prepare('SELECT * FROM web_sessions WHERE id = ?').get(id) as
+      { id: string; token: string; username: string; csrf: string; expires_at: number } | undefined;
+    if (!row) return null;
+    if (row.expires_at <= Date.now()) {
+      sessionDb.prepare('DELETE FROM web_sessions WHERE id = ?').run(id);
+      return null;
+    }
+    return {
+      id: row.id, token: row.token, username: row.username,
+      csrf: row.csrf, expiresAt: row.expires_at,
+    };
+  }
+
+  function deleteSession(id: string): void {
+    sessions.delete(id);
+    sessionDb.prepare('DELETE FROM web_sessions WHERE id = ?').run(id);
+  }
 
   const publicFiles: Record<string, { file: string; type: string }> = {
     '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
@@ -183,11 +226,13 @@ export function createWebServer(options: WebServerOptions): Server {
   function sessionFrom(request: IncomingMessage): Session | null {
     const id = parseCookies(request.headers.cookie).tb_session;
     if (!id) return null;
-    const session = sessions.get(id);
+    let session = sessions.get(id);
+    if (!session) session = loadSession(id) ?? undefined;
     if (!session || session.expiresAt <= Date.now()) {
-      if (session) sessions.delete(id);
+      if (session) deleteSession(id);
       return null;
     }
+    sessions.set(id, session);
     return session;
   }
 
@@ -245,6 +290,7 @@ export function createWebServer(options: WebServerOptions): Server {
         offset: Number.isFinite(rawOffset) ? rawOffset : 0,
         showId: url.searchParams.get('show_id') ?? undefined,
         episodeId: url.searchParams.get('episode_id') ?? undefined,
+        query: url.searchParams.get('q')?.trim() || undefined,
       });
       return sendJson(response, 200, {
         transcripts: items.map(transcriptMetadata),
@@ -512,6 +558,7 @@ export function createWebServer(options: WebServerOptions): Server {
             id, token: result.token, username, csrf: randomUUID(), expiresAt: Date.now() + sessionTtlMs,
           };
           sessions.set(id, session);
+          saveSession(session);
           loginAttempts.delete(remote);
           setSessionCookie(response, id, Math.floor(sessionTtlMs / 1000));
           return sendJson(response, 200, {
@@ -526,7 +573,7 @@ export function createWebServer(options: WebServerOptions): Server {
 
       if (method === 'POST' && path === '/api/logout') {
         const session = sessionFrom(request);
-        if (session) sessions.delete(session.id);
+        if (session) deleteSession(session.id);
         setSessionCookie(response, '', 0);
         return sendJson(response, 200, { ok: true });
       }
@@ -577,8 +624,12 @@ export function createWebServer(options: WebServerOptions): Server {
   async function handleTranscriptionQueue(request: IncomingMessage, response: ServerResponse,
     session: Session, method: string, path: string): Promise<void> {
     if (method === 'GET' && path === '/api/transcription/queue') {
+      const titles = new Map(store.listShows().map((show) => [show.show_id, show.title]));
       return sendJson(response, 200, {
-        items: transcriptionQueue.list(),
+        items: transcriptionQueue.list().map((item) => ({
+          ...item,
+          show_title: titles.get(item.show_id) ?? null,
+        })),
         counts: transcriptionQueue.counts(),
         paused: transcriptionQueue.getState('paused') === '1',
         error: transcriptionQueue.getState('error'),
@@ -596,13 +647,23 @@ export function createWebServer(options: WebServerOptions): Server {
       for (const episode of episodes) {
         if (!episode.audio_url) throw new WebError(409, 'AUDIO_URL_MISSING', `单集没有音频地址：${episode.title}`);
       }
-      const result = transcriptionQueue.add(episodes.map((episode) => ({
+      const force = body.force === true;
+      const alreadyDone = force
+        ? []
+        : episodes.filter((episode) => transcriptionStore.getByEpisode(episode.episode_id) !== null);
+      const alreadyDoneIds = new Set(alreadyDone.map((episode) => episode.episode_id));
+      const queueable = episodes.filter((episode) => !alreadyDoneIds.has(episode.episode_id));
+      const result = transcriptionQueue.add(queueable.map((episode) => ({
         episode_id: episode.episode_id,
         show_id: episode.show_id,
         title: episode.title,
         audio_url: episode.audio_url ?? '',
       })));
-      return sendJson(response, 200, { ...result, counts: transcriptionQueue.counts() });
+      return sendJson(response, 200, {
+        ...result,
+        skipped_existing: alreadyDone.length,
+        counts: transcriptionQueue.counts(),
+      });
     }
 
     if (method === 'POST' && path === '/api/transcription/queue/start') {
@@ -626,8 +687,17 @@ export function createWebServer(options: WebServerOptions): Server {
 
     if (method === 'GET' && path === '/api/transcription/transcripts') {
       const titles = new Map(store.listShows().map((show) => [show.show_id, show.title]));
+      const limit = Number(new URL(request.url ?? '/', 'http://localhost').searchParams.get('limit') ?? '20');
+      const offset = Number(new URL(request.url ?? '/', 'http://localhost').searchParams.get('cursor') ?? '0');
+      const query = new URL(request.url ?? '/', 'http://localhost').searchParams.get('q')?.trim() || undefined;
+      const { items, next_offset } = transcriptionStore.listPage({
+        limit: Number.isFinite(limit) ? limit : 20,
+        offset: Number.isFinite(offset) ? offset : 0,
+        query,
+      });
       return sendJson(response, 200, {
-        transcripts: transcriptionStore.list(100).map((transcript) => ({
+        total: transcriptionStore.count(),
+        transcripts: items.map((transcript) => ({
           transcript_id: transcript.transcript_id,
           task_id: transcript.task_id,
           episode_id: transcript.episode_id,
@@ -641,6 +711,69 @@ export function createWebServer(options: WebServerOptions): Server {
           segments: transcript.segments.length,
           created_at: transcript.created_at,
         })),
+        next_cursor: next_offset === null ? null : String(next_offset),
+      });
+    }
+
+    if (method === 'POST' && path === '/api/transcription/queue/bulk') {
+      const body = await readJson(request);
+      const action = typeof body.action === 'string' ? body.action : '';
+      const ids = Array.isArray(body.ids)
+        ? body.ids.filter((id): id is string => typeof id === 'string' && id.length > 0).slice(0, 500)
+        : [];
+      if (!['enable', 'disable', 'remove', 'cancel', 'retry'].includes(action)) {
+        throw new WebError(400, 'INVALID_ACTION', '不支持的批量操作');
+      }
+      if (ids.length === 0) throw new WebError(400, 'INVALID_INPUT', 'ids 不能为空');
+      const token = action === 'cancel' ? await servicePlatformToken() : null;
+      let updated = 0;
+      let skipped = 0;
+      const errors: string[] = [];
+      for (const id of ids) {
+        const item = transcriptionQueue.get(id);
+        if (!item) { skipped += 1; continue; }
+        try {
+          if (action === 'enable' || action === 'disable') {
+            transcriptionQueue.setEnabled(id, action === 'enable');
+            updated += 1;
+          } else if (action === 'remove') {
+            if (item.status === 'running') {
+              skipped += 1;
+              errors.push(`${item.title}：运行中，请先取消`);
+            } else if (transcriptionQueue.remove(id)) {
+              updated += 1;
+            } else {
+              skipped += 1;
+            }
+          } else if (action === 'cancel') {
+            if (item.status !== 'running' && item.status !== 'pending') {
+              skipped += 1;
+              continue;
+            }
+            if (item.status === 'running' && item.task_id) {
+              if (!token) throw new Error('缺少平台凭据，无法关闭任务');
+              await platformJson(`/v1/tasks/${encodeURIComponent(item.task_id)}/close`, {
+                method: 'POST', token, body: { reason: '队列取消' },
+              }).catch(() => {});
+            }
+            transcriptionQueue.markCanceled(id);
+            updated += 1;
+          } else if (action === 'retry') {
+            if (item.status !== 'failed' && item.status !== 'canceled') {
+              skipped += 1;
+              continue;
+            }
+            transcriptionQueue.retry(id);
+            updated += 1;
+          }
+        } catch (error) {
+          skipped += 1;
+          errors.push(`${item.title}：${(error as Error).message}`);
+        }
+      }
+      return sendJson(response, 200, {
+        ok: true, action, updated, skipped, errors,
+        counts: transcriptionQueue.counts(),
       });
     }
 
@@ -680,8 +813,8 @@ export function createWebServer(options: WebServerOptions): Server {
     if (moveMatch && method === 'POST') {
       const id = decodeURIComponent(moveMatch[1]);
       const body = await readJson(request);
-      if (body.direction !== 'up' && body.direction !== 'down') {
-        throw new WebError(400, 'INVALID_INPUT', 'direction 必须是 up 或 down');
+      if (body.direction !== 'up' && body.direction !== 'down' && body.direction !== 'top') {
+        throw new WebError(400, 'INVALID_INPUT', 'direction 必须是 up、down 或 top');
       }
       const moved = transcriptionQueue.move(id, body.direction);
       if (!moved) throw new WebError(409, 'QUEUE_MOVE_FAILED', '已经在边界或队列项不存在');
@@ -737,6 +870,17 @@ export function createWebServer(options: WebServerOptions): Server {
         rssUrl: typeof body.rss_url === 'string' ? body.rss_url : undefined,
       });
       return sendJson(response, 201, { show });
+    }
+
+    const archiveMatch = path.match(/^\/api\/podcast\/shows\/([^/]+)\/archive$/);
+    if (archiveMatch && method === 'POST') {
+      const body = await readJson(request);
+      if (typeof body.archived !== 'boolean') {
+        throw new WebError(400, 'INVALID_INPUT', 'archived 必须是 boolean');
+      }
+      return sendJson(response, 200, {
+        show: store.setArchived(decodeURIComponent(archiveMatch[1]), body.archived),
+      });
     }
 
     const episodeTranscribe = path.match(/^\/api\/podcast\/episodes\/([^/]+)\/transcribe$/);
@@ -891,6 +1035,7 @@ export function createWebServer(options: WebServerOptions): Server {
   const cleanup = setInterval(() => {
     const now = Date.now();
     for (const [id, session] of sessions) if (session.expiresAt <= now) sessions.delete(id);
+    sessionDb.prepare('DELETE FROM web_sessions WHERE expires_at <= ?').run(now);
     for (const [remote, attempt] of loginAttempts) if (attempt.until <= now) loginAttempts.delete(remote);
   }, 10 * 60_000);
   cleanup.unref();
@@ -902,6 +1047,7 @@ export function createWebServer(options: WebServerOptions): Server {
     transcriptionQueue.close();
     transcriptionStore.close();
     store.close();
+    sessionDb.close();
   });
   return server;
 }

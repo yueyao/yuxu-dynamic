@@ -22,6 +22,7 @@ export type PodcastShow = {
   last_sync_at: string | null;
   last_sync_status: string | null;
   last_error: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -70,7 +71,7 @@ type ShowRow = {
   id: string; url: string; title: string; author: string | null; description: string | null;
   cover_url: string | null; rss_url: string | null; total_episode_count: number | null;
   page_episode_count: number | null; coverage_status: string; last_sync_at: number | null;
-  last_sync_status: string | null; last_error: string | null;
+  last_sync_status: string | null; last_error: string | null; archived_at: number | null;
   created_at: number; updated_at: number;
 };
 
@@ -169,6 +170,7 @@ export class PodcastStore {
         last_sync_at INTEGER,
         last_sync_status TEXT,
         last_error TEXT,
+        archived_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -208,6 +210,10 @@ export class PodcastStore {
         ON podcast_ingest_runs(show_id, started_at DESC);
       INSERT OR IGNORE INTO podcast_migrations(version, applied_at) VALUES (1, ${Date.now()});
     `);
+    const showColumns = this.db.prepare('PRAGMA table_info(podcast_shows)').all() as Array<{ name: string }>;
+    if (!showColumns.some((column) => column.name === 'archived_at')) {
+      this.db.exec('ALTER TABLE podcast_shows ADD COLUMN archived_at INTEGER');
+    }
   }
 
   close(): void {
@@ -248,6 +254,7 @@ export class PodcastStore {
       last_sync_at: iso(row.last_sync_at),
       last_sync_status: row.last_sync_status,
       last_error: row.last_error,
+      archived_at: iso(row.archived_at),
       created_at: new Date(row.created_at).toISOString(),
       updated_at: new Date(row.updated_at).toISOString(),
     };
@@ -290,6 +297,13 @@ export class PodcastStore {
     const existing = this.getShowByUrl(normalized);
     if (existing) return existing;
     return this.addShow({ url: normalized, title });
+  }
+
+  setArchived(id: string, archived: boolean): PodcastShow {
+    this.showRow(id);
+    this.db.prepare('UPDATE podcast_shows SET archived_at = ?, updated_at = ? WHERE id = ?')
+      .run(archived ? Date.now() : null, Date.now(), id);
+    return this.getShow(id);
   }
 
   updateShow(id: string, patch: { title?: string; rssUrl?: string | null }): PodcastShow {
@@ -504,13 +518,22 @@ export class PodcastStore {
     }));
   }
 
-  overview(): { shows: number; episodes: number; partial_shows: number; last_run_at: string | null } {
-    const shows = (this.db.prepare('SELECT COUNT(*) AS count FROM podcast_shows').get() as { count: number }).count;
+  overview(): {
+    shows: number; episodes: number; partial_shows: number; archived_shows: number;
+    last_run_at: string | null;
+  } {
+    const shows = (this.db.prepare('SELECT COUNT(*) AS count FROM podcast_shows WHERE archived_at IS NULL')
+      .get() as { count: number }).count;
     const episodes = (this.db.prepare('SELECT COUNT(*) AS count FROM podcast_episodes').get() as { count: number }).count;
     const partial = (this.db.prepare(`SELECT COUNT(*) AS count FROM podcast_shows
-      WHERE coverage_status IN ('partial', 'page_only')`).get() as { count: number }).count;
+      WHERE archived_at IS NULL AND coverage_status IN ('partial', 'page_only')`).get() as { count: number }).count;
+    const archived = (this.db.prepare('SELECT COUNT(*) AS count FROM podcast_shows WHERE archived_at IS NOT NULL')
+      .get() as { count: number }).count;
     const lastRun = this.db.prepare('SELECT started_at FROM podcast_ingest_runs ORDER BY started_at DESC LIMIT 1')
       .get() as { started_at: number } | undefined;
-    return { shows, episodes, partial_shows: partial, last_run_at: lastRun ? iso(lastRun.started_at) : null };
+    return {
+      shows, episodes, partial_shows: partial, archived_shows: archived,
+      last_run_at: lastRun ? iso(lastRun.started_at) : null,
+    };
   }
 }

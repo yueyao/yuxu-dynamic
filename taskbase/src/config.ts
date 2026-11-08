@@ -28,5 +28,5 @@ export const config = {
   platformUrl: envValue('YUXUN_URL', 'TASKBASE_URL', 'http://127.0.0.1:3333') as string,
   webHost: envValue('YUXUN_WEB_HOST', 'TASKBASE_WEB_HOST', '127.0.0.1') as string,
   webPort: positiveInt(envValue('YUXUN_WEB_PORT', 'TASKBASE_WEB_PORT'), 3334, 'YUXUN_WEB_PORT'),
-  webSessionTtlMs: positiveInt(envValue('YUXUN_WEB_SESSION_TTL_MS', 'TASKBASE_WEB_SESSION_TTL_MS'), 12 * 60 * 60 * 1000, 'YUXUN_WEB_SESSION_TTL_MS'),
+  webSessionTtlMs: positiveInt(envValue('YUXUN_WEB_SESSION_TTL_MS', 'TASKBASE_WEB_SESSION_TTL_MS'), 30 * 24 * 60 * 60 * 1000, 'YUXUN_WEB_SESSION_TTL_MS'),
 };

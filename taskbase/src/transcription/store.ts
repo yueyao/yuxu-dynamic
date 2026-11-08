@@ -134,6 +134,12 @@ export class TranscriptionStore {
     return rows.map((row) => this.toRecord(row));
   }
 
+  count(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM transcription_transcripts').get() as
+      { count: number };
+    return row.count;
+  }
+
   getById(id: string): TranscriptRecord | null {
     const row = this.db.prepare('SELECT * FROM transcription_transcripts WHERE id = ?')
       .get(id) as TranscriptRow | undefined;
@@ -141,7 +147,7 @@ export class TranscriptionStore {
   }
 
   listPage(options: {
-    limit?: number; offset?: number; showId?: string; episodeId?: string;
+    limit?: number; offset?: number; showId?: string; episodeId?: string; query?: string;
   } = {}): { items: TranscriptRecord[]; next_offset: number | null } {
     const limit = Number.isSafeInteger(options.limit)
       ? Math.min(Math.max(options.limit as number, 1), 100) : 20;
@@ -151,6 +157,10 @@ export class TranscriptionStore {
     const params: Array<string | number> = [];
     if (options.showId) { clauses.push('show_id = ?'); params.push(options.showId); }
     if (options.episodeId) { clauses.push('episode_id = ?'); params.push(options.episodeId); }
+    if (options.query) {
+      clauses.push('(title LIKE ? OR episode_id LIKE ?)');
+      params.push(`%${options.query}%`, `%${options.query}%`);
+    }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.prepare(`SELECT * FROM transcription_transcripts ${where}
       ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as TranscriptRow[];
