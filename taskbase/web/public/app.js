@@ -17,7 +17,6 @@
       sort: 'published_at', order: 'desc', page: 1, limit: 50,
     },
     transcriptFilters: { q: '', limit: 20 },
-    transcribeTab: 'queue',
     queueSelected: new Set(),
     queueFilters: { q: '', showId: '', status: '', page: 1 },
     queueTimer: null,
@@ -31,8 +30,8 @@
     'tasks-all': { title: '全部任务', subtitle: '提交、执行、关闭与重试', render: renderTasks },
     apps: { title: '应用', subtitle: '任务定义与 Worker 凭据', render: renderApps },
     schedules: { title: '调度', subtitle: 'cron 调度、下次触发与运行历史', render: renderSchedules },
-    'podcast-shows': { title: '内容库', subtitle: '节目库与候选节目', render: renderPodcastShows },
-    episodes: { title: '单集库', subtitle: '按时间、播客和转写状态浏览所有单集', render: renderEpisodes },
+    'podcast-shows': { title: '内容库', subtitle: '订阅列表与候选节目', render: renderPodcastShows },
+    episodes: { title: '单集库', subtitle: '单集库与转写列表', render: renderEpisodes },
     transcript: { title: '转写稿', subtitle: '在 Web 中阅读转写 Markdown', render: renderTranscript },
   };
 
@@ -453,11 +452,23 @@
       el('button', {
         type: 'button', class: `tab ${active ? 'active' : ''}`,
         onClick: () => navigate('podcast-shows'),
-      }, `节目库 ${counts.active || 0}`),
+      }, `订阅列表 ${counts.active || 0}`),
       el('button', {
         type: 'button', class: `tab ${active ? '' : 'active'}`,
         onClick: () => navigate('podcast-shows?tab=candidate'),
       }, `候选节目 ${counts.candidate || 0}`));
+  }
+
+  function episodeTabs(active) {
+    return el('div', { class: 'tabs episode-tabs' },
+      el('button', {
+        type: 'button', class: `tab ${active === 'episodes' ? 'active' : ''}`,
+        onClick: () => navigate('episodes'),
+      }, '单集库'),
+      el('button', {
+        type: 'button', class: `tab ${active === 'transcripts' ? 'active' : ''}`,
+        onClick: () => navigate('episodes?tab=transcripts'),
+      }, '转写列表'));
   }
 
   function taskTabs(active) {
@@ -1072,7 +1083,19 @@
 
   async function renderEpisodes() {
     const filters = state.episodeFilters;
+    const tab = hashParams().get('tab') === 'transcripts' ? 'transcripts' : 'episodes';
     setPageActions(actionButton('刷新', 'refresh', () => renderEpisodes()));
+    if (tab === 'transcripts') {
+      const transcriptFilters = state.transcriptFilters;
+      const params = new URLSearchParams({ limit: String(transcriptFilters.limit) });
+      if (transcriptFilters.q) params.set('q', transcriptFilters.q);
+      const data = await transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [], total: 0 }));
+      const transcripts = data.transcripts || [];
+      clear(content);
+      content.append(episodeTabs('transcripts'));
+      renderTranscriptHistory(transcripts, data.total ?? transcripts.length);
+      return;
+    }
     const showsData = await podcast('/shows').catch(() => ({ shows: [] }));
     const shows = showsData.shows || [];
     const params = new URLSearchParams({
@@ -1100,6 +1123,7 @@
     filters.page = page;
 
     clear(content);
+    content.append(episodeTabs('episodes'));
     content.append(el('div', { class: 'stats-grid' },
       statCard('单集总数', summary.total, '已采集入库', 'layers', 'blue'),
       statCard('已转写', summary.transcribed, '有转写稿', 'check', 'green'),
@@ -1385,7 +1409,7 @@
     const tableNode = shows.length
       ? table([selectAll, '节目', '单集', '覆盖', '最近同步', '操作'], rows)
       : emptyState(
-        active ? '还没有已采集节目' : '没有候选节目',
+        active ? '订阅列表为空' : '没有候选节目',
         active ? '去候选节目里做首次采集，或直接添加节目。'
           : (archivedCandidates.length ? '当前没有活跃候选；可以显示已忽略的节目并恢复。' : '所有节目都至少采集过一次了。'),
         active ? 'mic' : 'database');
@@ -1394,6 +1418,11 @@
       trs = [...tableNode.querySelectorAll('tbody tr')];
       trs.forEach((tr, index) => {
         tr.dataset.search = `${shows[index].title} ${shows[index].author || ''} ${shows[index].url}`.toLowerCase();
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', (event) => {
+          if (event.target.closest('button, input, a')) return;
+          openEpisodes(shows[index]);
+        });
       });
       search.addEventListener('input', () => {
         const keyword = search.value.trim().toLowerCase();
@@ -1405,7 +1434,7 @@
     content.append(el('section', { class: 'card' },
       el('div', { class: 'card-head' },
         el('div', {},
-          el('div', { class: 'card-title' }, active ? '节目库' : '候选节目'),
+          el('div', { class: 'card-title' }, active ? '订阅列表' : '候选节目'),
           el('div', { class: 'card-sub' }, selectedCount
             ? `已选 ${selectedCount} 个节目，可在采集弹窗中批量提交`
             : (active ? '已采集过的节目会持续更新' : '首次采集成功后自动进入节目库'))),
@@ -1519,19 +1548,11 @@
   async function renderTranscribeQueue() {
     if (state.queueTimer) { clearTimeout(state.queueTimer); state.queueTimer = null; }
     setPageActions(actionButton('刷新', 'refresh', () => renderTranscribeQueue()));
-    const filters = state.transcriptFilters;
-    const params = new URLSearchParams({ limit: String(filters.limit) });
-    if (filters.q) params.set('q', filters.q);
-    const [data, transcriptData] = await Promise.all([
-      transcription('/queue'),
-      transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [] })),
-    ]);
+    const data = await transcription('/queue');
     const items = data.items || [];
     const queueItems = items.filter((item) => item.status !== 'done');
     const activeQueueCount = queueItems.filter((item) => item.status !== 'canceled').length;
     const counts = data.counts || {};
-    const transcripts = transcriptData.transcripts || [];
-    const transcriptTotal = transcriptData.total ?? transcripts.length;
     const validIds = new Set(queueItems.map((item) => item.id));
     for (const id of [...state.queueSelected]) if (!validIds.has(id)) state.queueSelected.delete(id);
 
@@ -1546,22 +1567,6 @@
     if (data.error) {
       content.append(el('div', { class: 'notice notice-warn' },
         el('div', {}, el('strong', {}, '队列已暂停'), el('div', { class: 'hint' }, data.error))));
-    }
-
-    const tabs = el('div', { class: 'tabs' },
-      el('button', {
-        type: 'button', class: `tab ${state.transcribeTab === 'queue' ? 'active' : ''}`,
-        onClick: () => { state.transcribeTab = 'queue'; renderTranscribeQueue(); },
-      }, `转写队列 ${activeQueueCount}`),
-      el('button', {
-        type: 'button', class: `tab ${state.transcribeTab === 'history' ? 'active' : ''}`,
-        onClick: () => { state.transcribeTab = 'history'; renderTranscribeQueue(); },
-      }, `已入库转写稿 ${transcriptTotal}`));
-    content.append(tabs);
-
-    if (state.transcribeTab === 'history') {
-      renderTranscriptHistory(transcripts, transcriptTotal);
-      return;
     }
 
     const queueFilters = state.queueFilters;
@@ -1775,7 +1780,7 @@
       onKeydown: (event) => {
         if (event.key === 'Enter') {
           state.transcriptFilters.q = event.target.value.trim();
-          renderTranscribeQueue();
+          renderEpisodes();
         }
       },
     });
@@ -1783,7 +1788,7 @@
       class: 'select',
       onChange: (event) => {
         state.transcriptFilters.limit = Number(event.target.value);
-        renderTranscribeQueue();
+        renderEpisodes();
       },
     }, [20, 50, 100].map((value) => option(String(value), `最近 ${value} 条`, filters.limit === value)));
     const rows = transcripts.map((transcript) => [
@@ -1808,17 +1813,17 @@
     ]);
     content.append(el('section', { class: 'card' },
       el('div', { class: 'card-head' },
-        el('div', {}, el('div', { class: 'card-title' }, '已入库转写稿'),
+        el('div', {}, el('div', { class: 'card-title' }, '转写内容'),
           el('div', { class: 'card-sub' }, `显示 ${transcripts.length} / ${transcriptTotal} 条；支持标题与 episode id 搜索`)),
         el('div', { class: 'toolbar' }, queryInput,
           actionButton('查询', 'search', () => {
             state.transcriptFilters.q = queryInput.value.trim();
-            renderTranscribeQueue();
+            renderEpisodes();
           }, 'btn btn-sm btn-primary'),
           limitSelect,
           filters.q ? actionButton('清空', 'x', () => {
             state.transcriptFilters.q = '';
-            renderTranscribeQueue();
+            renderEpisodes();
           }, 'btn btn-sm') : null)),
       el('div', { class: 'card-body flush' },
         transcripts.length
@@ -1923,7 +1928,7 @@
         if (existing) parts.push(`已有转写稿 ${existing} 集`);
         toast(result.added === 0 && existing ? '所选单集都已有转写稿，已跳过' : parts.join('，'), 'success');
         closeModal();
-        if (state.route === 'transcribe-queue') await renderTranscribeQueue();
+        if (state.route === 'tasks') await renderTranscribeQueue();
       } catch (error) {
         toast(error.message, 'error');
       }
@@ -2037,7 +2042,8 @@
     }
     await transcription('/queue/start', { method: 'POST' });
     toast('已加入转写队列并开始', 'success');
-    if (state.route === 'transcribe-queue') await renderTranscribeQueue();
+    if (state.route === 'tasks') await renderTranscribeQueue();
+    else if (state.route === 'episodes') await renderEpisodes();
   }
 
   function appendInline(parent, text) {
