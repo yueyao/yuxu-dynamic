@@ -9,6 +9,8 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { envValue } from '../src/env.ts';
+import { diagnosticMessage, redactText } from '../src/redact.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LABEL = 'com.yuxun.worker';
@@ -25,34 +27,31 @@ type AgentConfig = {
 };
 
 function agentDir(): string {
-  return resolve(process.env.YUXUN_MAC_AGENT_DIR ?? process.env.TASKBASE_MAC_AGENT_DIR
-    ?? join(homedir(), '.config', 'yuxun'));
+  return resolve(envValue('YUXUN_MAC_AGENT_DIR', 'TASKBASE_MAC_AGENT_DIR', join(homedir(), '.config', 'yuxun')) as string);
 }
 function envPath(): string { return join(agentDir(), 'worker.env'); }
 function configPath(): string { return join(agentDir(), 'worker.json'); }
 function legacyAgentDir(): string {
-  return resolve(process.env.TASKBASE_LEGACY_AGENT_DIR ?? join(homedir(), '.config', 'taskbase'));
+  return resolve(envValue('YUXUN_LEGACY_AGENT_DIR', 'TASKBASE_LEGACY_AGENT_DIR', join(homedir(), '.config', 'taskbase')) as string);
 }
 function legacyEnvPath(): string { return join(legacyAgentDir(), 'mac-agent.env'); }
 function legacyConfigPath(): string { return join(legacyAgentDir(), 'mac-agent.json'); }
 function defaultDataDir(): string {
-  return join(homedir(), 'Library', 'Application Support', 'Yuxun');
+  return resolve(envValue('YUXUN_DATA_DIR', 'TASKBASE_DATA_DIR', join(homedir(), 'Library', 'Application Support', 'Yuxun')) as string);
 }
 function launchAgentsDir(): string {
-  return resolve(process.env.YUXUN_LAUNCH_AGENTS_DIR ?? process.env.TASKBASE_LAUNCH_AGENTS_DIR
-    ?? join(homedir(), 'Library', 'LaunchAgents'));
+  return resolve(envValue('YUXUN_LAUNCH_AGENTS_DIR', 'TASKBASE_LAUNCH_AGENTS_DIR', join(homedir(), 'Library', 'LaunchAgents')) as string);
 }
 function plistPath(): string { return join(launchAgentsDir(), `${LABEL}.plist`); }
 function legacyPlistPath(): string { return join(launchAgentsDir(), `${LEGACY_LABEL}.plist`); }
 function logPath(): string {
-  return resolve(process.env.YUXUN_MAC_AGENT_LOG ?? process.env.TASKBASE_MAC_AGENT_LOG
-    ?? join(homedir(), 'Library', 'Logs', 'yuxun-worker.log'));
+  return resolve(envValue('YUXUN_MAC_AGENT_LOG', 'TASKBASE_MAC_AGENT_LOG', join(homedir(), 'Library', 'Logs', 'yuxun-worker.log')) as string);
 }
 
 /** DSH/Electron 里 process.execPath 可能是 Helper；优先找真正的 node。 */
 function nodeBinary(): string {
   const candidates = [
-    process.env.TASKBASE_NODE_BIN,
+    envValue('YUXUN_NODE_BIN', 'TASKBASE_NODE_BIN'),
     '/usr/local/bin/node',
     '/opt/homebrew/bin/node',
     '/usr/bin/node',
@@ -131,11 +130,11 @@ async function health(server: string): Promise<{ ok: boolean; detail: string }> 
   for (const path of ['/health', '/api/health']) {
     try {
       const response = await fetch(new URL(path, server), { signal: AbortSignal.timeout(8_000) });
-      const detail = `${path} ${response.status} ${(await response.text()).slice(0, 100)}`;
+      const detail = `${path} ${response.status} ${diagnosticMessage(await response.text(), 100)}`;
       if (response.ok) return { ok: true, detail };
       last = detail;
     } catch (error) {
-      last = `${path} ${(error as Error).message}`;
+      last = `${path} ${diagnosticMessage(error)}`;
     }
   }
   return { ok: false, detail: last };
@@ -175,8 +174,8 @@ function envFile(server: string, token: string, dataDir: string, model: string, 
 
 async function pair(args: string[]): Promise<void> {
   await migrateLegacyFiles();
-  const server = (option(args, '--server') ?? process.env.TASKBASE_URL ?? '').replace(/\/+$/, '');
-  const token = option(args, '--token') ?? process.env.YUXUN_WORKER_TOKEN ?? process.env.TASKBASE_WORKER_TOKEN
+  const server = (option(args, '--server') ?? envValue('YUXUN_URL', 'TASKBASE_URL', '') as string).replace(/\/+$/, '');
+  const token = option(args, '--token') ?? envValue('YUXUN_WORKER_TOKEN', 'TASKBASE_WORKER_TOKEN')
     ?? (existsSync(envPath()) ? (await readFile(envPath(), 'utf8')).match(/^(?:YUXUN_WORKER_TOKEN|TASKBASE_WORKER_TOKEN)=(.*)$/m)?.[1] : undefined);
   if (!server) throw new Error('缺少 --server，例如 http://43.156.253.152');
   if (!token) throw new Error('缺少 --token（Transcription Worker Token）');
@@ -201,8 +200,8 @@ async function pair(args: string[]): Promise<void> {
   await writeFile(configPath(), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   await chmod(configPath(), 0o600);
   const result = await health(server);
-  console.log(`已配对：${server}`);
-  console.log(`服务端健康：${result.ok ? '正常' : `失败（${result.detail}）`}`);
+  console.log(`已配对：${redactText(server)}`);
+  console.log(`服务端健康：${result.ok ? '正常' : `失败（${redactText(result.detail)}）`}`);
   console.log(`Provider：${provider}/${model}`);
   console.log(`数据目录：${dataDir}`);
   console.log(`环境文件：${envPath()}`);
@@ -225,7 +224,7 @@ async function doctor(): Promise<void> {
     checks.push(['服务端 /health', server.ok, `${config.server} ${server.detail}`]);
     checks.push(['数据目录', existsSync(config.data_dir), config.data_dir]);
   }
-  for (const [name, ok, detail] of checks) console.log(`${ok ? '✅' : '❌'} ${name}: ${detail}`);
+  for (const [name, ok, detail] of checks) console.log(`${ok ? '✅' : '❌'} ${name}: ${redactText(detail)}`);
   if (checks.some(([, ok]) => !ok)) process.exitCode = 1;
 }
 
@@ -308,19 +307,19 @@ async function start(): Promise<void> {
 
 async function stop(): Promise<void> {
   const result = await launchctl(['bootout', serviceTarget()]);
-  console.log(result.ok ? 'Yuxun Worker 服务已停止' : `停止失败：${result.output}`);
+  console.log(result.ok ? 'Yuxun Worker 服务已停止' : `停止失败：${redactText(result.output)}`);
   if (!result.ok) process.exitCode = 1;
 }
 
 async function status(): Promise<void> {
   await migrateLegacyFiles();
   const config = await readConfig();
-  console.log(`服务端：${config?.server ?? '未配对'}`);
+  console.log(`服务端：${redactText(config?.server ?? '未配对')}`);
   console.log(`Provider：${config?.provider ?? '未设置'}/${config?.model ?? '未设置'}`);
   console.log(`环境：${envPath()}`);
   console.log(`后台服务：${plistPath()}`);
   const result = await launchctl(['print', serviceTarget()]);
-  console.log(result.ok ? result.output : '后台服务 未安装或未运行');
+  console.log(result.ok ? redactText(result.output) : '后台服务 未安装或未运行');
   if (!result.ok) process.exitCode = 1;
 }
 
@@ -388,6 +387,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error((error as Error).message);
+  console.error(diagnosticMessage(error));
   process.exitCode = 1;
 });

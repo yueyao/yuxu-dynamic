@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /** 转写 Worker：下载公开音频 → ffmpeg 标准化 → 本地 ASR → 交付结果与产物到服务端。 */
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { envValue } from '../env.ts';
+import { envValue, positiveInt } from '../env.ts';
+import { diagnosticMessage, redactText } from '../redact.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { TRANSCRIPTION_APP_ID } from './manifest.ts';
 import type { TranscriptSegment } from './store.ts';
@@ -14,6 +14,7 @@ import type { AsrProvider, AsrResult } from './asr.ts';
 import { createAsrProvider } from './providers.ts';
 import { SafeHttpClient } from './safe-http.ts';
 import { renderTranscriptMarkdown } from './markdown.ts';
+import { runProcess } from '../process.ts';
 
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 
@@ -21,6 +22,7 @@ export type TranscriptionWorkerOptions = {
   asrProvider?: AsrProvider;
   pollMs?: number;
   chunkSeconds?: number;
+  signal?: AbortSignal;
 };
 
 type TaskInput = {
@@ -48,44 +50,30 @@ function input(value: unknown): TaskInput {
   };
 }
 
-async function download(url: string, destination: string): Promise<void> {
+async function download(url: string, destination: string, signal?: AbortSignal): Promise<void> {
   const client = new SafeHttpClient({}, {
     allowInsecure: process.env.TRANSCRIPTION_ALLOW_INSECURE_HTTP === '1',
   });
   await client.download(url, destination, {
     maxBytes: MAX_AUDIO_BYTES,
     timeoutMs: 30 * 60 * 1000,
+    signal,
     headers: { 'user-agent': 'Mozilla/5.0 Taskbase/0.3' },
   });
 }
 
-function runProcess(command: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`${command} 失败（${code}）：${stderr.slice(-1000)}`));
-    });
-  });
-}
-
-async function runFfmpeg(inputPath: string, outputPath: string): Promise<void> {
+async function runFfmpeg(inputPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {
   await runProcess('ffmpeg', [
     '-y', '-loglevel', 'error', '-i', inputPath,
     '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', outputPath,
-  ]);
+  ], { signal });
 }
 
-async function probeDuration(path: string): Promise<number> {
+async function probeDuration(path: string, signal?: AbortSignal): Promise<number> {
   const value = await runProcess('ffprobe', [
     '-v', 'error', '-show_entries', 'format=duration',
     '-of', 'default=noprint_wrappers=1:nokey=1', path,
-  ]);
+  ], { signal, timeoutMs: 60_000 });
   const duration = Number(value.trim());
   return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
@@ -93,7 +81,7 @@ async function probeDuration(path: string): Promise<number> {
 export type AudioChunk = { path: string; offset: number; duration: number };
 
 /** 用 ffmpeg segment 切成独立 WAV；按实际时长累加 offset，避免依赖理论 chunk 边界。 */
-export async function splitAudio(wav: string, workDir: string, chunkSeconds: number): Promise<AudioChunk[]> {
+export async function splitAudio(wav: string, workDir: string, chunkSeconds: number, signal?: AbortSignal): Promise<AudioChunk[]> {
   if (!Number.isFinite(chunkSeconds) || chunkSeconds <= 0) throw new Error('chunkSeconds 必须是正数');
   const outputDir = join(workDir, 'chunks');
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
@@ -102,7 +90,7 @@ export async function splitAudio(wav: string, workDir: string, chunkSeconds: num
     '-f', 'segment', '-segment_time', String(chunkSeconds),
     '-reset_timestamps', '1', '-c', 'copy',
     join(outputDir, 'chunk-%05d.wav'),
-  ]);
+  ], { signal });
   const files = (await readdir(outputDir))
     .filter((name) => name.endsWith('.wav'))
     .sort();
@@ -111,7 +99,7 @@ export async function splitAudio(wav: string, workDir: string, chunkSeconds: num
   let offset = 0;
   for (const name of files) {
     const path = join(outputDir, name);
-    const duration = await probeDuration(path);
+    const duration = await probeDuration(path, signal);
     chunks.push({ path, offset, duration });
     offset += duration;
   }
@@ -150,22 +138,23 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
   const provider = options.asrProvider ?? createAsrProvider();
   const workDir = await mkdtemp(join(tmpdir(), 'taskbase-transcribe-'));
   try {
-    await client.withHeartbeat(lease, async (active) => {
-      await active.log(lease, 'info', `开始转写：${task.title ?? task.audio_url}`);
+    await client.withHeartbeat(lease, async (active, signal) => {
+      await active.log(lease, 'info', `开始转写：${task.title ?? lease.task_id}`);
       await active.progress(lease, 5, '下载音频');
       const downloaded = join(workDir, 'source');
-      await download(task.audio_url, downloaded);
+      await download(task.audio_url, downloaded, signal);
 
       await active.progress(lease, 20, '转换为 16k 单声道 WAV');
       const wav = join(workDir, 'audio.wav');
-      await runFfmpeg(downloaded, wav);
+      await runFfmpeg(downloaded, wav, signal);
 
       const chunkSeconds = options.chunkSeconds
         ?? Number(process.env.TRANSCRIPTION_CHUNK_SECONDS ?? 600);
-      const chunks = await splitAudio(wav, workDir, chunkSeconds);
+      const chunks = await splitAudio(wav, workDir, chunkSeconds, signal);
       await active.progress(lease, 30, `音频 ${chunks.length} 段，开始转写`);
       const completed: Array<{ offset: number; result: AsrResult }> = [];
       for (const [index, chunk] of chunks.entries()) {
+        signal.throwIfAborted();
         const stepKey = `asr-chunk-${index}`;
         let chunkResult = active.stepValue<AsrResult>(lease, stepKey);
         if (chunkResult) {
@@ -173,7 +162,8 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
         } else {
           await active.progress(lease, 30 + Math.round((index / chunks.length) * 55),
             `转写切片 ${index + 1}/${chunks.length}`);
-          chunkResult = await provider.transcribe(chunk.path, task.language ?? 'zh');
+          chunkResult = await provider.transcribe(chunk.path, task.language ?? 'zh', signal);
+          signal.throwIfAborted();
           await active.saveStep(lease, stepKey, chunkResult);
         }
         completed.push({ offset: chunk.offset, result: chunkResult });
@@ -201,7 +191,7 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
         provider: result.provider,
         model: result.model,
       });
-    });
+    }, options.signal);
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -216,7 +206,7 @@ export async function runTranscriptionOnce(client: WorkerClient,
   } catch (error) {
     const stale = error instanceof RemoteError && error.code === 'STALE_ATTEMPT';
     if (!stale) {
-      const message = (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+      const message = diagnosticMessage(error);
       console.error('转写任务失败', message);
       await client.fail(lease, message).catch(() => {});
     }
@@ -240,29 +230,29 @@ export async function runTranscriptionWorker(overrides: TranscriptionWorkerRunOp
   const client = new WorkerClient({
     baseUrl,
     token,
-    heartbeatMs: overrides.heartbeatMs
-      ?? Number(envValue('YUXUN_HEARTBEAT_MS', 'TASKBASE_HEARTBEAT_MS', '15000')),
+    heartbeatMs: positiveInt(overrides.heartbeatMs
+      ?? envValue('YUXUN_HEARTBEAT_MS', 'TASKBASE_HEARTBEAT_MS'), 15_000, 'YUXUN_HEARTBEAT_MS'),
   });
   const options: TranscriptionWorkerOptions = {
-    pollMs: overrides.pollMs
-      ?? Number(envValue('YUXUN_POLL_MS', 'TASKBASE_POLL_MS', '2000')),
+    pollMs: positiveInt(overrides.pollMs
+      ?? envValue('YUXUN_POLL_MS', 'TASKBASE_POLL_MS'), 2_000, 'YUXUN_POLL_MS'),
   };
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort());
   process.on('SIGTERM', () => controller.abort());
-  console.log(`Transcription Worker 已启动：${baseUrl}`);
+  console.log(`Transcription Worker 已启动：${redactText(baseUrl)}`);
   while (!controller.signal.aborted) {
     try {
-      const worked = await runTranscriptionOnce(client, options);
+      const worked = await runTranscriptionOnce(client, { ...options, signal: controller.signal });
       if (!worked) await sleep(options.pollMs ?? 2_000, controller.signal);
     } catch (error) {
       if (controller.signal.aborted) break;
-      console.error('Transcription Worker 循环出错', error);
+      console.error('Transcription Worker 循环出错', diagnosticMessage(error));
       await sleep(3_000, controller.signal).catch(() => {});
     }
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await runTranscriptionWorker();
+  await runTranscriptionWorker().catch((error) => { console.error(diagnosticMessage(error)); process.exitCode = 1; });
 }

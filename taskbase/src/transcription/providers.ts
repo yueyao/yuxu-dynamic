@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { WhisperCliProvider, type AsrProvider, type AsrResult } from './asr.ts';
 import type { TranscriptSegment } from './store.ts';
+import { diagnosticMessage } from '../redact.ts';
 
 export type ProviderEnvironment = Record<string, string | undefined>;
 
@@ -30,7 +31,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : '未知网络错误';
+  return diagnosticMessage(error);
 }
 
 function contentType(path: string): string {
@@ -96,7 +97,7 @@ export class FunAsrProvider implements AsrProvider {
     this.timeoutMs = options.requestTimeoutMs ?? 30 * 60 * 1000;
   }
 
-  async transcribe(filePath: string, language = 'zh'): Promise<AsrResult> {
+  async transcribe(filePath: string, language = 'zh', signal?: AbortSignal): Promise<AsrResult> {
     const audio = await readFile(filePath);
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(audio)], { type: contentType(filePath) }), basename(filePath));
@@ -109,14 +110,14 @@ export class FunAsrProvider implements AsrProvider {
         method: 'POST',
         headers: this.apiToken ? { authorization: `Bearer ${this.apiToken}` } : {},
         body: form,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs),
       });
     } catch (error) {
       throw new Error(`TRANSCRIPTION_FAILED: FunASR 请求失败：${errorMessage(error)}`);
     }
     const body = await response.json().catch(() => null) as unknown;
     const root = record(body);
-    if (!response.ok) throw statusError('FunASR', response.status, JSON.stringify(root ?? body).slice(0, 500));
+    if (!response.ok) throw statusError('FunASR', response.status, diagnosticMessage(JSON.stringify(root ?? body), 500));
     if (!root || typeof root.text !== 'string') throw new Error('TRANSCRIPTION_FAILED: FunASR 返回格式无效');
     const duration = finite(root.duration) ?? 0;
     const segments = normalizeSegments(root.segments, root.text, duration);
@@ -150,7 +151,7 @@ export class ElevenLabsProvider implements AsrProvider {
     this.timeoutMs = options.requestTimeoutMs ?? 30 * 60 * 1000;
   }
 
-  async transcribe(filePath: string, language = 'zh'): Promise<AsrResult> {
+  async transcribe(filePath: string, language = 'zh', signal?: AbortSignal): Promise<AsrResult> {
     const audio = await readFile(filePath);
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(audio)], { type: contentType(filePath) }), basename(filePath));
@@ -165,14 +166,14 @@ export class ElevenLabsProvider implements AsrProvider {
         method: 'POST',
         headers: { 'xi-api-key': this.apiKey },
         body: form,
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)]) : AbortSignal.timeout(this.timeoutMs),
       });
     } catch (error) {
       throw new Error(`TRANSCRIPTION_FAILED: ElevenLabs 请求失败：${errorMessage(error)}`);
     }
     const body = await response.json().catch(() => null) as unknown;
     const root = record(body);
-    if (!response.ok) throw statusError('ElevenLabs', response.status, JSON.stringify(root ?? body).slice(0, 500));
+    if (!response.ok) throw statusError('ElevenLabs', response.status, diagnosticMessage(JSON.stringify(root ?? body), 500));
     if (!root || typeof root.text !== 'string') throw new Error('TRANSCRIPTION_FAILED: ElevenLabs 返回格式无效');
     const words = Array.isArray(root.words) ? root.words.map(record) : [];
     const start = Math.min(...words.map((word) => finite(word?.start) ?? Infinity));

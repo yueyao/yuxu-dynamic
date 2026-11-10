@@ -55,17 +55,21 @@ for (const [network, prefix] of [
 export type SafeHttpOptions = {
   /** 仅用于本地开发/测试：允许 HTTP 和 loopback/私网地址。生产不要开启。 */
   allowInsecure?: boolean;
+  /** 公开 RSS 可使用 HTTP；仍拒绝私网和保留地址。 */
+  allowHttp?: boolean;
 };
 
 export class SafeHttpClient {
   private readonly resolveHost: NonNullable<SafeHttpDependencies['resolveHost']>;
   private readonly request: NonNullable<SafeHttpDependencies['request']>;
   private readonly allowInsecure: boolean;
+  private readonly allowHttp: boolean;
 
   constructor(dependencies: SafeHttpDependencies = {}, options: SafeHttpOptions = {}) {
     this.resolveHost = dependencies.resolveHost ?? resolvePublicAddresses;
     this.request = dependencies.request ?? requestPinnedAddress;
     this.allowInsecure = options.allowInsecure ?? false;
+    this.allowHttp = options.allowHttp ?? false;
   }
 
   async getText(input: string, options: RequestOptions & { maxBytes: number }): Promise<{
@@ -75,11 +79,17 @@ export class SafeHttpClient {
   }> {
     const signal = combinedSignal(options);
     const response = await this.open(input, { ...options, signal });
+    const declared = Number(firstHeader(response.headers['content-length']));
+    if (Number.isFinite(declared) && declared > options.maxBytes) {
+      response.body.destroy();
+      throw new Error('SOURCE_TOO_LARGE: 页面响应超过允许大小');
+    }
     const onAbort = () => response.body.destroy(abortError(signal));
     signal.addEventListener('abort', onAbort, { once: true });
     const chunks: Buffer[] = [];
     let size = 0;
     try {
+      signal.throwIfAborted();
       for await (const chunk of response.body) {
         signal.throwIfAborted();
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -90,6 +100,9 @@ export class SafeHttpClient {
         }
         chunks.push(buffer);
       }
+    } catch (error) {
+      response.body.destroy();
+      throw error;
     } finally {
       signal.removeEventListener('abort', onAbort);
     }
@@ -143,19 +156,21 @@ export class SafeHttpClient {
   private async open(input: string, options: RequestOptions): Promise<SafeHttpResponse & { finalUrl: string }> {
     let current = new URL(input);
     for (let redirect = 0; redirect <= 5; redirect += 1) {
-      validateUrl(current, options.allowedHosts, this.allowInsecure);
-      const addresses = await addressesForHost(current.hostname, this.resolveHost, this.allowInsecure);
+      options.signal?.throwIfAborted();
+      validateUrl(current, options.allowedHosts, this.allowInsecure || this.allowHttp);
+      const addresses = await abortable(addressesForHost(current.hostname, this.resolveHost, this.allowInsecure), options.signal);
+      options.signal?.throwIfAborted();
       const response = await this.request(current, addresses[0], options.timeoutMs,
         options.headers ?? {}, options.signal);
       if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
         const location = firstHeader(response.headers.location);
-        response.body.resume();
+        response.body.destroy();
         if (!location) throw new Error('MEDIA_DOWNLOAD_FAILED: 重定向缺少 Location');
         current = new URL(location, current);
         continue;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        response.body.resume();
+        response.body.destroy();
         throw new Error(`MEDIA_DOWNLOAD_FAILED: HTTP ${response.statusCode}`);
       }
       return { ...response, finalUrl: current.toString() };
@@ -179,6 +194,7 @@ function validateUrl(url: URL, allowedHosts?: readonly string[], allowInsecure =
 
 async function addressesForHost(hostname: string,
   resolver: NonNullable<SafeHttpDependencies['resolveHost']>, allowInsecure = false): Promise<ResolvedAddress[]> {
+  hostname = hostname.replace(/^\[|\]$/g, '');
   const literalFamily = isIP(hostname);
   const addresses = literalFamily
     ? [{ address: hostname, family: literalFamily as 4 | 6 }]
@@ -242,6 +258,16 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
 function combinedSignal(options: RequestOptions): AbortSignal {
   const timeout = AbortSignal.timeout(options.timeoutMs);
   return options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+}
+
+function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 function abortError(signal: AbortSignal): Error {

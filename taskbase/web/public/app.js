@@ -1,3 +1,5 @@
+import { pagination, cursorPagination } from './pagination.js';
+
 (() => {
   'use strict';
 
@@ -7,21 +9,22 @@
     me: null,
     route: 'overview',
     apps: [],
-    taskFilters: { app: '', status: '' },
+    taskFilters: { app: '', status: '', cursors: [null] },
     selectedShowIds: new Set(),
     selectedCandidateIds: new Set(),
     showArchivedCandidates: false,
+    showFilters: { active: { page: 1, q: '' }, candidate: { page: 1, q: '' } },
     libraryCounts: { active: 0, candidate: 0 },
     episodeFilters: {
       q: '', showId: '', since: '', until: '', transcript: '', source: '',
       sort: 'published_at', order: 'desc', page: 1, limit: 50,
     },
-    transcriptFilters: { q: '', limit: 20 },
+    transcriptFilters: { q: '', limit: 20, page: 1 },
     queueSelected: new Set(),
     queueFilters: { q: '', showId: '', status: '', page: 1 },
     queueTimer: null,
     episodeTimer: null,
-    podcastTaskFilters: { status: '', type: '' },
+    podcastTaskFilters: { status: '', type: '', cursors: [null] },
     podcastTaskTimer: null,
   };
 
@@ -686,11 +689,11 @@
     setPageActions(actionButton('刷新', 'refresh', () => renderCurrent()));
     await loadApps();
     const [tasksData, schedulesData, podcastData, showsData, queueData] = await Promise.all([
-      platform('/tasks?limit=20'),
+      platform('/tasks?limit=20&summary=1'),
       platform('/schedules'),
       podcast('/overview').catch(() => null),
       podcast('/shows').catch(() => null),
-      transcription('/queue').catch(() => null),
+      transcription('/queue?summary=1').catch(() => null),
     ]);
     const tasks = tasksData.tasks || [];
     const schedules = schedulesData.schedules || [];
@@ -803,15 +806,16 @@
     const refresh = actionButton('刷新', 'refresh', () => renderTasks());
     setPageActions(refresh);
     const appSelect = el('select', { class: 'select', onChange: (event) => {
-      state.taskFilters.app = event.target.value; renderTasks();
+      state.taskFilters.app = event.target.value; state.taskFilters.cursors = [null]; renderTasks();
     } }, option('', '全部应用', !state.taskFilters.app),
       state.apps.map((app) => option(app.app_id, `${app.display_name}（${app.app_id}）`, state.taskFilters.app === app.app_id)));
     const statusSelect = el('select', { class: 'select', onChange: (event) => {
-      state.taskFilters.status = event.target.value; renderTasks();
+      state.taskFilters.status = event.target.value; state.taskFilters.cursors = [null]; renderTasks();
     } }, option('', '全部状态', !state.taskFilters.status),
       ['queued', 'running', 'recovering', 'succeeded', 'failed', 'closed'].map((status) =>
         option(status, STATUS_LABELS[status], state.taskFilters.status === status)));
-    const params = new URLSearchParams({ limit: '50' });
+    const params = new URLSearchParams({ limit: '50', summary: '1' });
+    if (state.taskFilters.cursors.at(-1)) params.set('cursor', state.taskFilters.cursors.at(-1));
     if (state.taskFilters.app) params.set('app_id', state.taskFilters.app);
     if (state.taskFilters.status) params.set('status', state.taskFilters.status);
     const data = await platform(`/tasks?${params.toString()}`);
@@ -820,7 +824,8 @@
       el('div', { class: 'card-head' },
         el('div', {}, el('div', { class: 'card-title' }, '任务列表'), el('div', { class: 'card-sub' }, `${(data.tasks || []).length} 个任务`)),
         el('div', { class: 'toolbar' }, appSelect, statusSelect, refresh)),
-      el('div', { class: 'card-body flush' }, tasksTable(data.tasks || []))));
+      el('div', { class: 'card-body flush' }, tasksTable(data.tasks || []),
+        cursorPagination(state.taskFilters.cursors, data.next_cursor, renderTasks))));
   }
 
   // ---------- 应用页 ----------
@@ -853,7 +858,9 @@
         el('div', { class: 'app-meta' },
           el('span', { class: 'pill' }, `${app.tasks.length} 个任务`),
           el('span', { class: 'pill' }, `并发 ${app.max_concurrency}`),
+          el('span', { class: `pill ${app.worker_online ? 'source' : ''}` }, app.worker_online ? 'Worker 在线' : 'Worker 离线'),
           app.app_id === 'podcast-tools' ? el('span', { class: 'pill source' }, '播客') : null),
+        el('div', { class: 'hint' }, app.last_worker_seen_at ? `最近联系 ${fmtRelative(app.last_worker_seen_at)}` : 'Worker 尚未连接'),
         el('div', { class: 'app-actions' },
           actionButton('任务定义', 'layers', () => openAppDefinitions(app.app_id), 'btn btn-sm'),
           actionButton('轮换 Token', 'refresh', () => rotateToken(app.app_id), 'btn btn-sm'))))),
@@ -1090,11 +1097,11 @@
     setPageActions(actionButton('刷新', 'refresh', () => renderEpisodes()));
     if (tab === 'transcripts') {
       const transcriptFilters = state.transcriptFilters;
-      const params = new URLSearchParams({ limit: String(transcriptFilters.limit) });
+      const params = new URLSearchParams({ limit: String(transcriptFilters.limit), cursor: String((transcriptFilters.page - 1) * transcriptFilters.limit) });
       if (transcriptFilters.q) params.set('q', transcriptFilters.q);
       const [data, queueData] = await Promise.all([
         transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [], total: 0 })),
-        transcription('/queue').catch(() => null),
+        transcription('/queue?summary=1').catch(() => null),
       ]);
       const transcripts = data.transcripts || [];
       clear(content);
@@ -1106,7 +1113,7 @@
     }
     const [showsData, queueData] = await Promise.all([
       podcast('/shows').catch(() => ({ shows: [] })),
-      transcription('/queue').catch(() => null),
+      transcription('/queue?summary=1').catch(() => null),
     ]);
     const shows = showsData.shows || [];
     const params = new URLSearchParams({
@@ -1289,36 +1296,34 @@
     const active = mode === 'active';
     const selection = active ? state.selectedShowIds : state.selectedCandidateIds;
     const rerender = () => renderShowLibrary(mode);
+    const filters = state.showFilters[mode];
+    const params = new URLSearchParams({ page: String(filters.page), mode, q: filters.q,
+      archived: state.showArchivedCandidates ? '1' : '0' });
     const [overview, showsData, runsData] = await Promise.all([
-      loadPodcastOverview(),
-      podcast('/shows'),
+      loadPodcastOverview(), podcast(`/shows?${params}`),
       active ? podcast('/runs').catch(() => ({ runs: [] })) : Promise.resolve({ runs: [] }),
     ]);
-    const allShows = showsData.shows || [];
-    const candidates = allShows.filter((show) => !isPulledShow(show) && !show.archived_at);
-    const archivedCandidates = allShows.filter((show) => !isPulledShow(show) && Boolean(show.archived_at));
-    const activeShows = allShows.filter(isPulledShow);
-    const shows = active
-      ? activeShows
-      : (state.showArchivedCandidates ? [...candidates, ...archivedCandidates] : candidates);
-    state.libraryCounts = { active: activeShows.length, candidate: candidates.length };
+    const shows = showsData.shows || [];
+    const counts = showsData.counts || {};
+    state.libraryCounts = { active: counts.active || 0, candidate: counts.candidate || 0 };
+    filters.page = showsData.page || 1;
     const runs = runsData.runs || [];
 
     const actions = [actionButton('刷新', 'refresh', rerender)];
     if (active) {
-      if (shows.length) {
+      if (counts.active) {
         actions.push(actionButton('采集一年', 'layers',
-          () => openCollectModal(new Set(shows.map((show) => show.show_id))), 'btn'));
+          () => openCollectModal('active'), 'btn'));
       }
-    } else if (candidates.length) {
+    } else if (counts.candidate) {
       actions.push(actionButton('采集全部候选', 'layers',
-        () => openCollectModal(new Set(candidates.map((show) => show.show_id))), 'btn'));
+        () => openCollectModal('candidate'), 'btn'));
     }
-    if (!active && archivedCandidates.length) {
+    if (!active && counts.archived) {
       actions.push(actionButton(
-        state.showArchivedCandidates ? '隐藏已忽略' : `显示已忽略（${archivedCandidates.length}）`,
+        state.showArchivedCandidates ? '隐藏已忽略' : `显示已忽略（${counts.archived}）`,
         'database',
-        () => { state.showArchivedCandidates = !state.showArchivedCandidates; rerender(); },
+        () => { state.showArchivedCandidates = !state.showArchivedCandidates; filters.page = 1; rerender(); },
         'btn'));
     }
     actions.push(actionButton('添加节目', 'plus', openAddShow, 'btn btn-primary'));
@@ -1346,15 +1351,15 @@
 
     if (active) {
       content.append(el('div', { class: 'stats-grid' },
-        statCard('节目', shows.length, `${overview.partial_shows} 个不完整`, 'mic', 'green'),
+        statCard('节目', counts.active || 0, `${overview.partial_shows} 个不完整`, 'mic', 'green'),
         statCard('单集', overview.episodes, '列表元数据', 'layers', 'blue'),
         statCard('播客应用', overview.app_registered ? '已注册' : '未注册', overview.app_id, 'app', 'purple'),
         statCard('最近采集', overview.last_run_at ? fmtRelative(overview.last_run_at) : '—', '仅列表，无音频', 'clock', 'amber')));
     } else {
       content.append(el('div', { class: 'stats-grid' },
-        statCard('候选节目', candidates.length, '尚未首次采集', 'database', 'blue'),
-        statCard('已忽略', archivedCandidates.length, '不参与批量采集', 'x', 'amber'),
-        statCard('已入库节目', activeShows.length, '至少采集过一次', 'mic', 'green'),
+        statCard('候选节目', counts.candidate || 0, '尚未首次采集', 'database', 'blue'),
+        statCard('已忽略', counts.archived || 0, '不参与批量采集', 'x', 'amber'),
+        statCard('已入库节目', counts.active || 0, '至少采集过一次', 'mic', 'green'),
         statCard('最近采集', overview.last_run_at ? fmtRelative(overview.last_run_at) : '—', '首次采集后转入节目库', 'clock', 'amber')));
       content.append(el('div', { class: 'notice' },
         el('div', {},
@@ -1362,7 +1367,8 @@
           el('div', { class: 'hint' }, '这里是从榜单导入、但还没有拉取过任何基础数据的节目。做过一次采集后会自动进入「节目库」，之后持续更新。'))));
     }
 
-    const search = el('input', { class: 'input', placeholder: '搜索节目、作者或链接' });
+    const search = el('input', { class: 'input', value: filters.q, placeholder: '搜索节目、作者或链接，回车查询',
+      onKeydown: (event) => { if (event.key === 'Enter') { filters.q = event.target.value.trim(); filters.page = 1; rerender(); } } });
     const bulkLabel = el('span', {}, active ? '批量采集' : '批量采集候选');
     const bulkButton = el('button', {
       class: 'btn btn-sm', type: 'button', disabled: selection.size === 0,
@@ -1417,6 +1423,11 @@
           ? `RSS 共 ${show.total_episode_count ?? show.page_episode_count ?? '—'} 集`
           : (show.page_episode_count || show.total_episode_count
             ? `页面 ${show.page_episode_count ?? '—'} / 总计 ${show.total_episode_count ?? '—'}` : '等待首次采集'))),
+      el('div', {},
+        el('div', { class: 'title-cell' }, show.episode_count > 0 ? `已转写 ${show.transcript_count || 0} 集` : '—'),
+        el('div', { class: 'sub' }, show.episode_count > 0
+          ? `共 ${show.episode_count} 集`
+          : '先采集单集')),
       el('div', {}, coverageBar(show),
         badge(show.coverage_status === 'full' ? 'full' : show.coverage_status === 'unknown' ? 'unknown' : 'partial')),
       el('div', {},
@@ -1438,11 +1449,11 @@
     ]);
 
     const tableNode = shows.length
-      ? table([selectAll, '节目', '单集', '覆盖', '最近同步', '操作'], rows)
+      ? table([selectAll, '节目', '单集', '已转写', '覆盖', '最近同步', '操作'], rows)
       : emptyState(
         active ? '订阅列表为空' : '没有候选节目',
         active ? '去候选节目里做首次采集，或直接添加节目。'
-          : (archivedCandidates.length ? '当前没有活跃候选；可以显示已忽略的节目并恢复。' : '所有节目都至少采集过一次了。'),
+          : (counts.archived ? '当前没有活跃候选；可以显示已忽略的节目并恢复。' : '所有节目都至少采集过一次了。'),
         active ? 'mic' : 'database');
 
     if (shows.length) {
@@ -1455,10 +1466,7 @@
           openEpisodes(shows[index]);
         });
       });
-      search.addEventListener('input', () => {
-        const keyword = search.value.trim().toLowerCase();
-        for (const tr of trs) tr.hidden = keyword.length > 0 && !tr.dataset.search.includes(keyword);
-      });
+
     }
 
     const selectedCount = selection.size;
@@ -1470,7 +1478,8 @@
             ? `已选 ${selectedCount} 个节目，可在采集弹窗中批量提交`
             : (active ? '已采集过的节目会持续更新' : '首次采集成功后自动进入节目库'))),
         el('div', { class: 'toolbar' }, bulkButton, search)),
-      el('div', { class: 'card-body flush' }, tableNode)));
+      el('div', { class: 'card-body flush' }, tableNode, pagination({ page: filters.page, pages: showsData.pages || 1, total: showsData.total || 0,
+        onPage: (page) => { filters.page = page; return rerender(); } }))));
 
     if (active) {
       content.append(el('section', { class: 'card' },
@@ -1579,14 +1588,14 @@
   async function renderTranscribeQueue() {
     if (state.queueTimer) { clearTimeout(state.queueTimer); state.queueTimer = null; }
     setPageActions(actionButton('刷新', 'refresh', () => renderTranscribeQueue()));
-    const data = await transcription('/queue');
-    const items = data.items || [];
-    const queueItems = items.filter((item) => item.status !== 'done');
-    const activeQueueCount = queueItems.filter((item) => item.status !== 'canceled').length;
+    const queueFilters = state.queueFilters;
+    const params = new URLSearchParams({ page: String(queueFilters.page), limit: '20' });
+    if (queueFilters.q) params.set('q', queueFilters.q);
+    if (queueFilters.showId) params.set('show_id', queueFilters.showId);
+    if (queueFilters.status) params.set('status', queueFilters.status);
+    const data = await transcription(`/queue?${params}`);
     const counts = data.counts || {};
-    const validIds = new Set(queueItems.map((item) => item.id));
-    for (const id of [...state.queueSelected]) if (!validIds.has(id)) state.queueSelected.delete(id);
-
+    const activeQueueCount = (counts.pending || 0) + (counts.running || 0) + (counts.failed || 0);
     clear(content);
     content.append(taskTabs('transcribe'));
     content.append(el('div', { class: 'stats-grid' },
@@ -1597,35 +1606,16 @@
 
     if (data.error) {
       content.append(el('div', { class: 'notice notice-warn' },
-        el('div', {}, el('strong', {}, '队列已暂停'), el('div', { class: 'hint' }, data.error))));
+        el('div', {}, el('strong', {}, data.paused ? '队列已暂停' : '队列等待恢复'), el('div', { class: 'hint' }, data.error))));
     }
 
-    const queueFilters = state.queueFilters;
-    const keyword = queueFilters.q.trim().toLowerCase();
-    const filteredQueue = queueItems.filter((item) => {
-      if (queueFilters.showId && item.show_id !== queueFilters.showId) return false;
-      if (queueFilters.status) {
-        if (item.status !== queueFilters.status) return false;
-      } else if (item.status === 'canceled') {
-        return false;
-      }
-      if (keyword && !`${item.title} ${item.show_title || ''} ${item.id}`.toLowerCase().includes(keyword)) return false;
-      return true;
-    });
     const hasQueueFilter = Boolean(queueFilters.q || queueFilters.showId || queueFilters.status);
-    const pageSize = 20;
-    const totalPages = Math.max(1, Math.ceil(filteredQueue.length / pageSize));
-    const page = Math.min(Math.max(1, queueFilters.page), totalPages);
+    const pageSize = data.limit || 20;
+    const totalPages = data.pages || 1;
+    const page = data.page || 1;
     queueFilters.page = page;
-    const pageItems = filteredQueue.slice((page - 1) * pageSize, page * pageSize);
-
-    const showMap = new Map();
-    for (const item of queueItems) {
-      if (item.show_id && !showMap.has(item.show_id)) {
-        showMap.set(item.show_id, item.show_title || shortId(item.show_id));
-      }
-    }
-
+    const pageItems = data.items || [];
+    const showMap = new Map((data.shows || []).map((show) => [show.show_id, show.title]));
     const resetFilters = () => {
       state.queueFilters = { q: '', showId: '', status: '', page: 1 };
       state.queueSelected.clear();
@@ -1690,7 +1680,7 @@
       el('div', {},
         el('div', { class: 'card-title' }, '转写队列'),
         el('div', { class: 'card-sub' },
-          `显示 ${filteredQueue.length}/${activeQueueCount} 项，已完成 ${counts.done || 0} 项；Web 负责选择与顺序，Worker 只执行平台下发的任务`)),
+          `显示 ${data.total}/${activeQueueCount} 项，已完成 ${counts.done || 0} 项；Web 负责选择与顺序，Worker 只执行平台下发的任务`)),
       el('div', { class: 'row-actions' },
         queueStopped
           ? actionButton('开始队列', 'play', () => queueAction('start', '队列已启动'), 'btn btn-primary')
@@ -1715,10 +1705,12 @@
 
     let selectAll;
     selectAll = el('input', {
-      type: 'checkbox', 'aria-label': '全选筛选结果',
+      type: 'checkbox', 'aria-label': '全选当前页',
       onChange: (event) => {
-        selected.clear();
-        if (event.target.checked) for (const item of filteredQueue) selected.add(item.id);
+        for (const item of pageItems) {
+          if (event.target.checked) selected.add(item.id);
+          else selected.delete(item.id);
+        }
         syncBulk();
         for (const box of document.querySelectorAll('.queue-select-box')) box.checked = event.target.checked;
       },
@@ -1747,6 +1739,8 @@
           item.enabled ? null : el('div', { class: 'sub' }, '已停用')),
         el('td', {},
           queueBadge(item.status),
+          item.phase === 'submitting' ? el('div', { class: 'sub' }, '确认提交中') : null,
+          item.phase === 'saving' ? el('div', { class: 'sub' }, '转写完成，正在入库') : null,
           item.status === 'running' ? progressCell(item.progress, 'running') : null,
           item.error ? el('div', { class: 'sub', style: 'color:var(--red)', title: item.error },
             String(item.error).slice(0, 80)) : null),
@@ -1781,7 +1775,7 @@
         class: 'btn btn-sm', type: 'button', disabled: page <= 1,
         onClick: () => { state.queueFilters.page = page - 1; renderTranscribeQueue(); },
       }, '上一页'),
-      el('span', { class: 'hint' }, `第 ${page} / ${totalPages} 页 · 共 ${filteredQueue.length} 项`),
+      el('span', { class: 'hint' }, `第 ${page} / ${totalPages} 页 · 共 ${data.total} 项`),
       el('button', {
         class: 'btn btn-sm', type: 'button', disabled: page >= totalPages,
         onClick: () => { state.queueFilters.page = page + 1; renderTranscribeQueue(); },
@@ -1810,7 +1804,7 @@
       class: 'input', value: filters.q, placeholder: '搜索单集标题或 episode id',
       onKeydown: (event) => {
         if (event.key === 'Enter') {
-          state.transcriptFilters.q = event.target.value.trim();
+          state.transcriptFilters.q = event.target.value.trim(); state.transcriptFilters.page = 1;
           renderEpisodes();
         }
       },
@@ -1818,7 +1812,7 @@
     const limitSelect = el('select', {
       class: 'select',
       onChange: (event) => {
-        state.transcriptFilters.limit = Number(event.target.value);
+        state.transcriptFilters.limit = Number(event.target.value); state.transcriptFilters.page = 1;
         renderEpisodes();
       },
     }, [20, 50, 100].map((value) => option(String(value), `最近 ${value} 条`, filters.limit === value)));
@@ -1848,18 +1842,20 @@
           el('div', { class: 'card-sub' }, `显示 ${transcripts.length} / ${transcriptTotal} 条；支持标题与 episode id 搜索`)),
         el('div', { class: 'toolbar' }, queryInput,
           actionButton('查询', 'search', () => {
-            state.transcriptFilters.q = queryInput.value.trim();
+            state.transcriptFilters.q = queryInput.value.trim(); state.transcriptFilters.page = 1;
             renderEpisodes();
           }, 'btn btn-sm btn-primary'),
           limitSelect,
           filters.q ? actionButton('清空', 'x', () => {
-            state.transcriptFilters.q = '';
+            state.transcriptFilters.q = ''; state.transcriptFilters.page = 1;
             renderEpisodes();
           }, 'btn btn-sm') : null)),
       el('div', { class: 'card-body flush' },
         transcripts.length
           ? table(['单集', '节目', '时长', '片段', '引擎', '完成时间', '操作'], rows)
-          : emptyState('没有匹配的转写稿', filters.q ? '换个关键词，或清空搜索条件。' : '队列完成一集后会自动写入这里。', 'tasks'))));
+          : emptyState('没有匹配的转写稿', filters.q ? '换个关键词，或清空搜索条件。' : '队列完成一集后会自动写入这里。', 'tasks'),
+        pagination({ page: filters.page, pages: Math.max(1, Math.ceil(transcriptTotal / filters.limit)), total: transcriptTotal,
+          onPage: (page) => { filters.page = page; return renderEpisodes(); } }))));
   }
 
   function openAddShow() {
@@ -1908,11 +1904,12 @@
 
   function openCollectModal(preselected) {
     const selected = preselected instanceof Set ? [...preselected] : [];
+    const scope = typeof preselected === 'string' ? preselected : null;
     const since = el('input', { class: 'input', type: 'date', value: defaultSince() });
     const until = el('input', { class: 'input', type: 'date', value: today() });
     const close = showModal({
       title: '采集播客列表',
-      subtitle: selected.length ? `已选 ${selected.length} 个节目` : '将采集全部未忽略节目（含候选）',
+      subtitle: selected.length ? `已选 ${selected.length} 个节目` : scope === 'active' ? '采集全部订阅节目' : scope === 'candidate' ? '采集全部未忽略候选' : '将采集全部未忽略节目（含候选）',
       body: [
         el('div', { class: 'form-grid' },
           el('label', { class: 'field' }, el('span', {}, '开始日期'), since),
@@ -1928,6 +1925,7 @@
           onClick: async () => {
             const body = { since: since.value, until: until.value };
             if (selected.length) body.show_ids = selected;
+            if (scope) body.show_scope = scope;
             const result = await podcast('/collect', { method: 'POST', body });
             toast(`已提交采集任务 ${shortId(result.task?.task_id)}`, 'success');
             close();
@@ -1938,10 +1936,9 @@
     });
   }
 
-  async function openEpisodes(show) {
-    const data = await podcast(`/shows/${encodeURIComponent(show.show_id)}/episodes?limit=500`);
+  async function openEpisodes(show, page = 1, selected = new Set()) {
+    const data = await podcast(`/shows/${encodeURIComponent(show.show_id)}/episodes?limit=50&offset=${(page - 1) * 50}`);
     const episodes = data.episodes || [];
-    const selected = new Set();
     const rowMeta = [];
     const currentYear = new Date().getFullYear();
     let visibleCount = episodes.length;
@@ -1979,7 +1976,6 @@
     const selectAll = el('input', {
       type: 'checkbox', 'aria-label': '全选当前显示',
       onChange: (event) => {
-        selected.clear();
         for (let index = 0; index < rowMeta.length; index += 1) {
           const meta = rowMeta[index];
           if (meta.row.hidden) {
@@ -1988,6 +1984,7 @@
           }
           meta.checkbox.checked = event.target.checked;
           if (event.target.checked) selected.add(meta.episode.episode_id);
+          else selected.delete(meta.episode.episode_id);
         }
         syncSelection();
       },
@@ -2002,7 +1999,7 @@
 
     const rows = episodes.map((episode) => {
       const checkbox = el('input', {
-        type: 'checkbox', 'aria-label': `选择 ${episode.title}`, dataset: { episodeId: episode.episode_id },
+        type: 'checkbox', checked: selected.has(episode.episode_id), 'aria-label': `选择 ${episode.title}`, dataset: { episodeId: episode.episode_id },
         onChange: (event) => {
           if (event.target.checked) selected.add(episode.episode_id);
           else selected.delete(episode.episode_id);
@@ -2053,9 +2050,10 @@
     let closeModal = () => {};
     closeModal = showModal({
       title: `单集 · ${show.title}`,
-      subtitle: `${episodes.length} 条已入库；可以只看今年并全选后加入转写队列`,
+      subtitle: `共 ${data.total} 条已入库；当前页可筛选今年并加入转写队列`,
       wide: true,
-      body: el('div', {}, toolbar, tableNode),
+      body: el('div', {}, toolbar, tableNode, pagination({ page, pages: Math.max(1, Math.ceil(data.total / 50)), total: data.total,
+        onPage: (next) => { closeModal(); return openEpisodes(show, next, selected); } })),
     });
   }
 
@@ -2315,7 +2313,7 @@
     const statusSelect = el('select', {
       class: 'select',
       onChange: (event) => {
-        state.podcastTaskFilters.status = event.target.value;
+        state.podcastTaskFilters.status = event.target.value; state.podcastTaskFilters.cursors = [null];
         renderPodcastTasks();
       },
     }, option('', '全部状态', !state.podcastTaskFilters.status),
@@ -2324,14 +2322,16 @@
     const typeSelect = el('select', {
       class: 'select',
       onChange: (event) => {
-        state.podcastTaskFilters.type = event.target.value;
+        state.podcastTaskFilters.type = event.target.value; state.podcastTaskFilters.cursors = [null];
         renderPodcastTasks();
       },
     }, option('', '全部类型', !state.podcastTaskFilters.type),
       option('collect', '批量采集', state.podcastTaskFilters.type === 'collect'),
       option('sync', '单节目同步', state.podcastTaskFilters.type === 'sync'));
 
-    const params = new URLSearchParams({ app_id: 'podcast-tools', limit: '50' });
+    const params = new URLSearchParams({ app_id: 'podcast-tools', limit: '50', summary: '1' });
+    if (state.podcastTaskFilters.cursors.at(-1)) params.set('cursor', state.podcastTaskFilters.cursors.at(-1));
+    if (state.podcastTaskFilters.type) params.set('task_key', state.podcastTaskFilters.type === 'collect' ? 'shows/collect' : 'show/sync');
     if (state.podcastTaskFilters.status) params.set('status', state.podcastTaskFilters.status);
     const [overview, data, showsData] = await Promise.all([
       loadPodcastOverview(),
@@ -2357,7 +2357,8 @@
           el('div', { class: 'card-sub' }, `${tasks.length} 个任务`)),
         el('div', { class: 'toolbar' }, statusSelect, typeSelect,
           actionButton('新建采集', 'plus', () => openCollectModal(), 'btn btn-sm btn-primary'))),
-      el('div', { class: 'card-body flush' }, podcastTasksTable(tasks, showTitles))));
+      el('div', { class: 'card-body flush' }, podcastTasksTable(tasks, showTitles),
+        cursorPagination(state.podcastTaskFilters.cursors, data.next_cursor, renderPodcastTasks))));
 
     if (tasks.some((task) => task.status === 'queued' || task.status === 'running')) {
       state.podcastTaskTimer = setTimeout(() => {

@@ -1,6 +1,7 @@
 /** RSS 2.0 / Atom feed 解析：只取列表元数据，不下载音频。 */
 import { XMLParser } from 'fast-xml-parser';
 import type { ParsedEpisode } from './store.ts';
+import { SafeHttpClient } from '../transcription/safe-http.ts';
 
 export type ParsedFeed = {
   title: string;
@@ -197,19 +198,18 @@ export function parseFeedXml(xml: string): ParsedFeed {
   };
 }
 
-export async function fetchFeed(url: string, fetchImpl: typeof fetch = fetch): Promise<string> {
-  const response = await fetchImpl(url, {
+export async function fetchFeed(url: string,
+  client = new SafeHttpClient({}, { allowHttp: true }), signal?: AbortSignal): Promise<string> {
+  const response = await client.getText(url, {
+    maxBytes: 20 * 1024 * 1024,
+    timeoutMs: 45_000,
+    signal,
     headers: {
       'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Taskbase/0.2',
       accept: 'application/rss+xml,application/atom+xml,application/xml,text/xml,*/*',
     },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(45_000),
   });
-  if (!response.ok) throw new Error(`RSS 抓取失败：HTTP ${response.status}`);
-  const length = Number(response.headers.get('content-length') ?? '0');
-  if (Number.isFinite(length) && length > 20 * 1024 * 1024) throw new Error('RSS 超过 20 MiB 限制');
-  const xml = await response.text();
+  const xml = response.text;
   const head = xml.trimStart().slice(0, 200).toLowerCase();
   if (head.startsWith('<!doctype html') || head.startsWith('<html')) {
     throw new Error('返回的是 HTML 而不是 RSS');

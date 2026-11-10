@@ -44,6 +44,9 @@ test('Web：登录、管理代理、播客注册、节目、采集和调度', as
   assert.equal(page.status, 200);
   assert.match(await page.text(), /Taskbase/);
   assert.equal((await fetch(`${webUrl}/app.js`)).status, 200);
+  const pagination = await fetch(`${webUrl}/pagination.js`);
+  assert.equal(pagination.status, 200);
+  assert.match(pagination.headers.get('content-type') ?? '', /javascript/);
 
   const loginResponse = await fetch(`${webUrl}/api/login`, {
     method: 'POST',
@@ -90,7 +93,9 @@ test('Web：登录、管理代理、播客注册、节目、采集和调度', as
   assert.equal(createdData.show.title, '测试播客');
 
   const shows = await fetch(`${webUrl}/api/podcast/shows`, { headers: { cookie } });
-  assert.equal((await shows.json() as { shows: unknown[] }).shows.length, 1);
+  const showsData = await shows.json() as { shows: Array<{ show_id: string; transcript_count: number }> };
+  assert.equal(showsData.shows.length, 1);
+  assert.equal(showsData.shows[0].transcript_count, 0);
 
   const overview = await fetch(`${webUrl}/api/podcast/overview`, { headers: { cookie } });
   assert.equal(overview.status, 200);

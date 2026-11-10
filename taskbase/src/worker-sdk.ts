@@ -1,4 +1,5 @@
 /** Worker 侧的最小 HTTP 客户端：领取、心跳、进度、日志、检查点、产物、完成和失败。 */
+import { redactText } from './redact.ts';
 
 export type WorkerLease = {
   task_id: string;
@@ -26,7 +27,7 @@ export class RemoteError extends Error {
   readonly requestId?: string;
 
   constructor(status: number, code: string, message: string, requestId?: string) {
-    super(requestId ? `${message} (request_id: ${requestId})` : message);
+    super(redactText(requestId ? `${message} (request_id: ${requestId})` : message));
     this.status = status;
     this.code = code;
     this.requestId = requestId;
@@ -95,14 +96,14 @@ export class WorkerClient {
   async progress(lease: WorkerLease, percent: number, message: string): Promise<void> {
     await this.request(`/v1/worker/tasks/${lease.task_id}/progress`, {
       method: 'POST', headers: this.attemptHeaders(lease),
-      body: JSON.stringify({ progress: percent, message }),
+      body: JSON.stringify({ progress: percent, message: redactText(message) }),
     }, 60_000);
   }
 
   async log(lease: WorkerLease, level: 'debug' | 'info' | 'warn' | 'error', message: string): Promise<void> {
     await this.request(`/v1/worker/tasks/${lease.task_id}/logs`, {
       method: 'POST', headers: this.attemptHeaders(lease),
-      body: JSON.stringify({ level, message }),
+      body: JSON.stringify({ level, message: redactText(message) }),
     }, 60_000);
   }
 
@@ -139,19 +140,25 @@ export class WorkerClient {
   async fail(lease: WorkerLease, message: string): Promise<void> {
     await this.request(`/v1/worker/tasks/${lease.task_id}/fail`, {
       method: 'POST', headers: this.attemptHeaders(lease),
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message: redactText(message) }),
     });
   }
 
   /** 执行处理器期间持续续租；心跳失败会中止工作。 */
   async withHeartbeat<T>(lease: WorkerLease,
-    work: (client: WorkerClient, signal: AbortSignal) => Promise<T>): Promise<T> {
+    work: (client: WorkerClient, signal: AbortSignal) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
     const controller = new AbortController();
+    const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+    signal.throwIfAborted();
+    let inFlight = false;
     const heartbeat = setInterval(() => {
-      void this.heartbeat(lease).catch((error) => controller.abort(error));
+      if (inFlight || signal.aborted) return;
+      inFlight = true;
+      void this.heartbeat(lease).catch((error) => controller.abort(error))
+        .finally(() => { inFlight = false; });
     }, this.options.heartbeatMs ?? 15_000);
     try {
-      return await work(this, controller.signal);
+      return await work(this, signal);
     } finally {
       clearInterval(heartbeat);
     }

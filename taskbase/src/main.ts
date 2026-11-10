@@ -2,6 +2,7 @@
 /** 平台 API 进程入口。 */
 import { resolve } from 'node:path';
 import { config } from './config.ts';
+import { diagnosticMessage } from './redact.ts';
 import { Store } from './store.ts';
 import { createPlatformServer } from './server.ts';
 
@@ -15,9 +16,9 @@ const server = createPlatformServer(store, {
   maxArtifactBytes: config.maxArtifactBytes,
 });
 
-const port = Number(process.env.TASKBASE_PORT ?? config.port);
+const port = config.port;
 server.on('error', (error) => {
-  console.error(`平台 API 无法监听 ${config.host}:${port}: ${(error as Error).message}`);
+  console.error(diagnosticMessage(`平台 API 无法监听 ${config.host}:${port}: ${diagnosticMessage(error)}`));
   store.closeDb();
   process.exitCode = 1;
 });

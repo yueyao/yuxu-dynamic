@@ -1,5 +1,6 @@
 /** 小宇宙公开节目页解析：读取 __NEXT_DATA__，只提取列表元数据，不下载音频。 */
 import type { ParsedEpisode } from './store.ts';
+import { SafeHttpClient } from '../transcription/safe-http.ts';
 
 export type ParsedShow = {
   sourceUrl: string;
@@ -89,15 +90,16 @@ export function parseXiaoyuzhouShow(html: string, sourceUrl: string): ParsedShow
   };
 }
 
-export async function fetchShowPage(url: string, fetchImpl: typeof fetch = fetch): Promise<string> {
-  const response = await fetchImpl(url, {
+export async function fetchShowPage(url: string,
+  client = new SafeHttpClient({}, { allowHttp: true }), signal?: AbortSignal): Promise<string> {
+  const response = await client.getText(url, {
+    maxBytes: 5 * 1024 * 1024,
+    timeoutMs: 30_000,
+    signal,
     headers: {
       'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Taskbase/0.2',
       accept: 'text/html,application/xhtml+xml',
     },
-    redirect: 'follow',
-    signal: AbortSignal.timeout(30_000),
   });
-  if (!response.ok) throw new Error(`抓取节目页失败：HTTP ${response.status}`);
-  return response.text();
+  return response.text;
 }

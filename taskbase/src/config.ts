@@ -1,14 +1,5 @@
 import { resolve } from 'node:path';
-import { envValue } from './env.ts';
-
-function positiveInt(value: string | undefined, fallback: number, name: string): number {
-  if (value === undefined || value === '') return fallback;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${name} 必须是正整数`);
-  }
-  return parsed;
-}
+import { envValue, positiveInt } from './env.ts';
 
 const dataDir = resolve(envValue('YUXUN_DATA_DIR', 'TASKBASE_DATA_DIR', '.data') as string);
 

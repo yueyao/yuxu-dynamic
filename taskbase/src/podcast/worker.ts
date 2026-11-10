@@ -3,15 +3,19 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.ts';
+import { envValue, positiveInt } from '../env.ts';
+import { diagnosticMessage } from '../redact.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { PODCAST_APP_ID } from './manifest.ts';
 import { fetchShowPage, parseXiaoyuzhouShow } from './parser.ts';
 import { fetchFeed, parseFeedXml } from './rss.ts';
 import { PodcastStore, type ParsedEpisode, type PodcastShow } from './store.ts';
+import { SafeHttpClient } from '../transcription/safe-http.ts';
 
 export type PodcastWorkerOptions = {
   dataDir?: string;
-  fetchImpl?: typeof fetch;
+  httpClient?: SafeHttpClient;
+  signal?: AbortSignal;
   now?: () => number;
   pollMs?: number;
 };
@@ -68,12 +72,12 @@ function asStringArray(value: unknown): string[] {
 }
 
 function errorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 1000);
+  return diagnosticMessage(error);
 }
 
 async function syncShow(store: PodcastStore, show: PodcastShow, range: DateRange,
-  taskId: string, fetchImpl: typeof fetch, active: WorkerClient, lease: WorkerLease,
-  percent: number): Promise<ShowResult> {
+  taskId: string, httpClient: SafeHttpClient, active: WorkerClient, lease: WorkerLease,
+  percent: number, signal: AbortSignal): Promise<ShowResult> {
   const startedAt = Date.now();
   const base: ShowResult = {
     show_id: show.show_id,
@@ -90,7 +94,7 @@ async function syncShow(store: PodcastStore, show: PodcastShow, range: DateRange
   try {
     await active.progress(lease, percent, `抓取《${show.title}》`);
     if (show.rss_url) {
-      const xml = await fetchFeed(show.rss_url, fetchImpl);
+      const xml = await fetchFeed(show.rss_url, httpClient, signal);
       const parsed = parseFeedXml(xml);
       const selected = filterEpisodes(parsed.episodes, range);
       const coverage = 'full';
@@ -123,7 +127,7 @@ async function syncShow(store: PodcastStore, show: PodcastShow, range: DateRange
         coverage_status: coverage,
       };
     }
-    const html = await fetchShowPage(show.url, fetchImpl);
+    const html = await fetchShowPage(show.url, httpClient, signal);
     const parsed = parseXiaoyuzhouShow(html, show.url);
     const selected = filterEpisodes(parsed.episodes, range);
     const coverage = parsed.totalEpisodeCount > parsed.pageEpisodeCount ? 'partial' : 'full';
@@ -157,6 +161,7 @@ async function syncShow(store: PodcastStore, show: PodcastShow, range: DateRange
       coverage_status: coverage,
     };
   } catch (error) {
+    signal.throwIfAborted();
     const message = errorMessage(error);
     try {
       store.markSync(show.show_id, { status: 'failed', error: message });
@@ -178,7 +183,7 @@ export async function executePodcastLease(client: WorkerClient, lease: WorkerLea
   if (lease.task_key !== 'shows/collect' && lease.task_key !== 'show/sync') {
     throw new Error('Podcast Worker 不支持该任务');
   }
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const httpClient = options.httpClient ?? new SafeHttpClient({}, { allowHttp: true });
   const now = options.now ?? (() => Date.now());
   const raw = (lease.input ?? {}) as Record<string, unknown>;
   const range = normalizeDateRange(
@@ -186,7 +191,7 @@ export async function executePodcastLease(client: WorkerClient, lease: WorkerLea
     typeof raw.until === 'string' ? raw.until : undefined,
     now(),
   );
-  await client.withHeartbeat(lease, async (active) => {
+  await client.withHeartbeat(lease, async (active, signal) => {
     await active.log(lease, 'info', `播客任务开始：${lease.task_key}，区间 ${range.since} 至 ${range.until}`);
     let targets: PodcastShow[] = [];
     if (lease.task_key === 'show/sync') {
@@ -208,9 +213,10 @@ export async function executePodcastLease(client: WorkerClient, lease: WorkerLea
     if (targets.length === 0) throw new Error('没有指定任何节目');
     const results: ShowResult[] = [];
     for (let index = 0; index < targets.length; index += 1) {
+      signal.throwIfAborted();
       const show = targets[index];
       const percent = Math.round(5 + ((index + 0.5) / targets.length) * 90);
-      results.push(await syncShow(store, show, range, lease.task_id, fetchImpl, client, lease, percent));
+      results.push(await syncShow(store, show, range, lease.task_id, httpClient, active, lease, percent, signal));
     }
     const inserted = results.reduce((sum, result) => sum + result.inserted, 0);
     const updated = results.reduce((sum, result) => sum + result.updated, 0);
@@ -222,7 +228,7 @@ export async function executePodcastLease(client: WorkerClient, lease: WorkerLea
     }
     await active.progress(lease, 100, '播客任务完成');
     await active.complete(lease, output);
-  });
+  }, options.signal);
 }
 
 export async function runPodcastOnce(client: WorkerClient, store: PodcastStore,
@@ -234,7 +240,7 @@ export async function runPodcastOnce(client: WorkerClient, store: PodcastStore,
   } catch (error) {
     const stale = error instanceof RemoteError && error.code === 'STALE_ATTEMPT';
     if (!stale) {
-      console.error('播客任务执行失败', error);
+      console.error('播客任务执行失败', diagnosticMessage(error));
       await client.fail(lease, errorMessage(error)).catch(() => {});
     }
   }
@@ -242,29 +248,29 @@ export async function runPodcastOnce(client: WorkerClient, store: PodcastStore,
 }
 
 async function main(): Promise<void> {
-  const token = process.env.TASKBASE_WORKER_TOKEN;
-  if (!token) throw new Error('请设置 TASKBASE_WORKER_TOKEN');
-  const store = new PodcastStore(config.dbPath);
+  const token = envValue('YUXUN_WORKER_TOKEN', 'TASKBASE_WORKER_TOKEN');
+  if (!token) throw new Error('请设置 YUXUN_WORKER_TOKEN（兼容 TASKBASE_WORKER_TOKEN）');
   const client = new WorkerClient({
-    baseUrl: process.env.TASKBASE_URL ?? 'http://127.0.0.1:3333',
+    baseUrl: envValue('YUXUN_URL', 'TASKBASE_URL', 'http://127.0.0.1:3333') as string,
     token,
-    heartbeatMs: Number(process.env.TASKBASE_HEARTBEAT_MS ?? 15_000),
+    heartbeatMs: positiveInt(envValue('YUXUN_HEARTBEAT_MS', 'TASKBASE_HEARTBEAT_MS'), 15_000, 'YUXUN_HEARTBEAT_MS'),
   });
   const options: PodcastWorkerOptions = {
     dataDir: config.dataDir,
-    pollMs: Number(process.env.TASKBASE_POLL_MS ?? 2_000),
+    pollMs: positiveInt(envValue('YUXUN_POLL_MS', 'TASKBASE_POLL_MS'), 2_000, 'YUXUN_POLL_MS'),
   };
+  const store = new PodcastStore(config.dbPath);
   const controller = new AbortController();
   process.on('SIGINT', () => controller.abort());
   process.on('SIGTERM', () => controller.abort());
   console.log('Podcast Worker 已启动');
   while (!controller.signal.aborted) {
     try {
-      const worked = await runPodcastOnce(client, store, options);
+      const worked = await runPodcastOnce(client, store, { ...options, signal: controller.signal });
       if (!worked) await sleep(options.pollMs ?? 2_000, controller.signal);
     } catch (error) {
       if (controller.signal.aborted) break;
-      console.error('Podcast Worker 循环出错', error);
+      console.error('Podcast Worker 循环出错', diagnosticMessage(error));
       await sleep(3_000, controller.signal).catch(() => {});
     }
   }
@@ -272,5 +278,5 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  await main();
+  await main().catch((error) => { console.error(diagnosticMessage(error)); process.exitCode = 1; });
 }

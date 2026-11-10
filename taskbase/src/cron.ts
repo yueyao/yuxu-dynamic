@@ -114,8 +114,8 @@ export function parseCron(expression: string): ParsedCron {
     days: parseField(dayField, '日期', 1, 31),
     months: parseField(monthField, '月份', 1, 12),
     weekdays: parseField(weekdayField, '星期', 0, 6, { sundayAlias: true }),
-    domRestricted: dayField !== '*',
-    dowRestricted: weekdayField !== '*',
+    domRestricted: !dayField.startsWith('*'),
+    dowRestricted: !weekdayField.startsWith('*'),
   };
 }
 
@@ -131,15 +131,41 @@ function matches(cron: ParsedCron, parts: LocalParts): boolean {
   return true;
 }
 
-/** 返回严格晚于 afterMs 的下一次触发时间；最多向后扫描 366 天。 */
+/** 按本地日期和候选时间跳跃；覆盖跨闰年、DST 缺失/重复时间，最多查 8 年。 */
 export function nextFire(expression: string, timezone: string, afterMs: number): number | null {
   const cron = parseCron(expression);
   if (!validateTimezone(timezone)) throw new Error('时区无效');
-  let candidate = Math.floor(afterMs / 60_000) * 60_000 + 60_000;
-  const limit = 366 * 24 * 60;
-  for (let index = 0; index < limit; index += 1) {
-    if (matches(cron, localParts(candidate, timezone))) return candidate;
-    candidate += 60_000;
+  if (!Number.isFinite(afterMs)) throw new Error('触发基准时间无效');
+  const start = localParts(afterMs, timezone);
+  const day = new Date(Date.UTC(start.year, start.month - 1, start.day));
+  const hours = [...cron.hours].sort((a, b) => a - b);
+  const minutes = [...cron.minutes].sort((a, b) => a - b);
+  for (let index = 0; index < 366 * 8; index += 1, day.setUTCDate(day.getUTCDate() + 1)) {
+    const year = day.getUTCFullYear();
+    const month = day.getUTCMonth() + 1;
+    const date = day.getUTCDate();
+    // 先检查日历字段，稀疏表达式不需要逐分钟调用 Intl。
+    if (!matches(cron, { year, month, day: date, weekday: day.getUTCDay(), hour: hours[0], minute: minutes[0] })) continue;
+    const offsets = new Set<number>();
+    for (let hour = -36; hour <= 36; hour += 12) {
+      const epoch = day.getTime() + hour * 3_600_000;
+      const local = localParts(epoch, timezone);
+      offsets.add(Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute) - epoch);
+    }
+    let next = Infinity;
+    for (const hour of hours) {
+      for (const minute of minutes) {
+        const wallTime = Date.UTC(year, month - 1, date, hour, minute);
+        for (const offset of offsets) {
+          const candidate = wallTime - offset;
+          if (candidate <= afterMs || candidate >= next) continue;
+          const local = localParts(candidate, timezone);
+          if (local.year === year && local.month === month && local.day === date
+            && local.hour === hour && local.minute === minute) next = candidate;
+        }
+      }
+    }
+    if (next !== Infinity) return next;
   }
   return null;
 }

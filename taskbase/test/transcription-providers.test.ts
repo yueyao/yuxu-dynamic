@@ -54,6 +54,26 @@ test('ElevenLabs Provider 解析 word timestamps', async () => {
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('ASR Provider 错误在截断前脱敏，不返回签名 URL 或部分秘密值', async () => {
+  const { dir, file } = await fixture();
+  try {
+    const fetchImpl = async () => Response.json({
+      url: 'https://user:password@example.com/audio?signature=signed-value#fragment',
+      token: 'x'.repeat(2000),
+    }, { status: 500 });
+    for (const provider of [new FunAsrProvider({ baseUrl: 'http://asr.test', fetchImpl }),
+      new ElevenLabsProvider({ apiKey: 'test-key', fetchImpl })]) {
+      await assert.rejects(provider.transcribe(file), (error: unknown) => {
+        const message = (error as Error).message;
+        assert.match(message, /TRANSCRIPTION_FAILED/);
+        assert.match(message, /example\.com\/audio/);
+        assert.doesNotMatch(message, /user:password|signed-value|fragment|xxxx/);
+        return true;
+      });
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('SafeHttpClient 默认拒绝 HTTP，允许显式测试模式', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'taskbase-safe-http-'));
   const target = join(dir, 'audio.bin');

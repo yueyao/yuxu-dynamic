@@ -7,6 +7,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { hashPassword, newToken, sha256, verifyPassword } from './crypto.ts';
+import { diagnosticMessage, redactText } from './redact.ts';
 import { nextFire, parseCron, validateTimezone } from './cron.ts';
 import {
   canonicalJson, parseManifest, validateJsonSchema,
@@ -14,6 +15,7 @@ import {
 } from './schema.ts';
 
 export type TaskStatus = 'queued' | 'running' | 'recovering' | 'succeeded' | 'failed' | 'closed';
+const MAX_INPUT_BYTES = 64 * 1024;
 
 type UserRow = { id: string; username: string; password_salt: string; password_hash: string };
 type AppRow = { app_id: string; display_name: string; max_concurrency: number };
@@ -226,6 +228,7 @@ export class Store {
     `);
     this.ensureColumn('tasks', 'schedule_id', 'TEXT');
     this.ensureColumn('tasks', 'planned_fire_time', 'INTEGER');
+    this.ensureColumn('apps', 'last_worker_seen_at', 'INTEGER');
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -300,6 +303,13 @@ export class Store {
     return row ? { appId: row.app_id } : null;
   }
 
+  markWorkerSeen(appId: string, now = Date.now()): void {
+    // 空闲时也会轮询领取；每 5 秒最多落盘一次，避免每条进度/日志都写应用行。
+    this.db.prepare(`UPDATE apps SET last_worker_seen_at = ? WHERE app_id = ?
+      AND (last_worker_seen_at IS NULL OR last_worker_seen_at <= ?)`)
+      .run(now, appId, now - 5000);
+  }
+
   // ---------- 应用与任务定义 ----------
 
   upsertApp(manifest: unknown, options: { rotateToken?: boolean; workerToken?: string } = {}): {
@@ -368,9 +378,14 @@ export class Store {
     });
   }
 
-  listApps(): AppRow[] {
-    return this.db.prepare('SELECT app_id, display_name, max_concurrency FROM apps ORDER BY app_id')
-      .all() as AppRow[];
+  listApps() {
+    const now = Date.now();
+    const rows = this.db.prepare('SELECT app_id, display_name, max_concurrency, last_worker_seen_at FROM apps ORDER BY app_id')
+      .all() as Array<AppRow & { last_worker_seen_at: number | null }>;
+    return rows.map(({ last_worker_seen_at, ...app }) => ({ ...app,
+      last_worker_seen_at: last_worker_seen_at === null ? null : new Date(last_worker_seen_at).toISOString(),
+      worker_online: last_worker_seen_at !== null && now - last_worker_seen_at < 90_000,
+    }));
   }
 
   getApp(appId: string): AppRow | null {
@@ -416,17 +431,27 @@ export class Store {
 
   // ---------- 任务 ----------
 
-  createTask(originKey: string, appId: string, taskKey: string, input: unknown,
-    idempotencyKey: string | null = null): { task: ReturnType<Store['getTask']>; reused: boolean } {
-    if (input === undefined) throw new PlatformError(400, 'INVALID_INPUT', '任务必须提供 input');
-    const definition = this.definitionRow(appId, taskKey, { enabledOnly: true });
-    const schema = parseJson<JsonSchema>(definition.input_schema_json);
-    const issues = validateJsonSchema(schema, input);
+  private validateInput(definition: DefinitionRow, input: unknown): string {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      throw new PlatformError(400, 'INVALID_INPUT', '任务 input 必须是 JSON 对象');
+    }
+    const json = JSON.stringify(input);
+    if (Buffer.byteLength(json, 'utf8') > MAX_INPUT_BYTES) {
+      throw new PlatformError(413, 'INPUT_TOO_LARGE', '任务输入超过 64 KiB');
+    }
+    const issues = validateJsonSchema(parseJson<JsonSchema>(definition.input_schema_json), input);
     if (issues.length > 0) {
       throw new PlatformError(400, 'INVALID_INPUT', issues.slice(0, 8)
         .map((issue) => `${issue.path} ${issue.message}`).join('；'));
     }
-    const inputJson = JSON.stringify(input);
+    return json;
+  }
+
+  createTask(originKey: string, appId: string, taskKey: string, input: unknown,
+    idempotencyKey: string | null = null): { task: ReturnType<Store['getTask']>; reused: boolean } {
+    if (input === undefined) throw new PlatformError(400, 'INVALID_INPUT', '任务必须提供 input');
+    const definition = this.definitionRow(appId, taskKey, { enabledOnly: true });
+    const inputJson = this.validateInput(definition, input);
     const inputHash = sha256(canonicalJson(input));
     return this.transaction(() => {
       if (idempotencyKey !== null) {
@@ -493,7 +518,7 @@ export class Store {
 
   listTasks(filters: {
     appId?: string; taskKey?: string; status?: TaskStatus; scheduleId?: string;
-    limit?: number; cursor?: string;
+    limit?: number; cursor?: string; summary?: boolean;
   } = {}) {
     const limit = filters.limit ?? 20;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
@@ -522,7 +547,16 @@ export class Store {
       where.push('(created_at < ? OR (created_at = ? AND id < ?))');
       args.push(position[0], position[0], position[1]);
     }
-    const sql = `SELECT * FROM tasks ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    const columns = filters.summary
+      ? `id, app_id, task_key, source, origin_key, input_json, input_hash, idempotency_key,
+         schedule_id, planned_fire_time, status, progress, created_at, updated_at, queue_deadline_at,
+         deadline_at, attempt_count, max_attempts, current_attempt_id, lease_expires_at,
+         final_artifact_id, close_reason, closed_at, closed_by, retry_of_task_id, error_code, error_message,
+         CASE WHEN app_id = 'podcast-tools' THEN json_object('inserted', json_extract(output_json, '$.inserted'),
+           'updated', json_extract(output_json, '$.updated'), 'failed', json_extract(output_json, '$.failed'))
+         ELSE NULL END AS output_json`
+      : '*';
+    const sql = `SELECT ${columns} FROM tasks ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY created_at DESC, id DESC LIMIT ?`;
     const rows = this.db.prepare(sql).all(...args, limit + 1) as TaskRow[];
     const page = rows.slice(0, limit);
@@ -575,6 +609,7 @@ export class Store {
   }
 
   log(taskId: string, attemptId: string, appId: string, level: string, message: string): void {
+    message = redactText(message);
     this.transaction(() => {
       this.currentAttempt(taskId, attemptId, appId);
       this.event(taskId, attemptId, 'log', { level, message });
@@ -653,6 +688,7 @@ export class Store {
   }
 
   progress(taskId: string, attemptId: string, appId: string, progress: number, message: string): void {
+    message = redactText(message);
     this.transaction(() => {
       this.currentAttempt(taskId, attemptId, appId);
       const now = Date.now();
@@ -680,10 +716,21 @@ export class Store {
     });
   }
 
+  artifactMaxBytes(taskId: string, attemptId: string, appId: string): number {
+    const task = this.currentAttempt(taskId, attemptId, appId);
+    return this.definitionRow(task.app_id, task.task_key).artifact_max_bytes ?? Infinity;
+  }
+
   createArtifact(taskId: string, attemptId: string, appId: string, id: string, name: string,
     contentType: string, byteSize: number, checksum: string): void {
     this.transaction(() => {
-      this.currentAttempt(taskId, attemptId, appId);
+      const limit = this.artifactMaxBytes(taskId, attemptId, appId);
+      if (!Number.isSafeInteger(byteSize) || byteSize < 0) {
+        throw new PlatformError(400, 'INVALID_ARTIFACT_SIZE', '产物大小必须是非负安全整数');
+      }
+      if (byteSize > limit) {
+        throw new PlatformError(413, 'ARTIFACT_TOO_LARGE', '产物超过任务定义的大小限制');
+      }
       this.db.prepare(`INSERT INTO artifacts(id, task_id, attempt_id, name, content_type,
         byte_size, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
         id, taskId, attemptId, name, contentType, byteSize, checksum, Date.now(),
@@ -728,6 +775,7 @@ export class Store {
   }
 
   fail(taskId: string, attemptId: string, appId: string, message: string) {
+    message = redactText(message);
     return this.transaction(() => {
       const row = this.taskRow(taskId);
       if (row.app_id !== appId) throw new PlatformError(403, 'WRONG_APP', '任务不属于该应用');
@@ -749,6 +797,7 @@ export class Store {
   // ---------- 手动操作 ----------
 
   close(taskId: string, closedBy: string, reason: string) {
+    reason = redactText(reason);
     return this.transaction(() => {
       const row = this.taskRow(taskId);
       if (row.status === 'closed') return this.toTask(row);
@@ -775,6 +824,7 @@ export class Store {
         throw new PlatformError(409, 'TASK_NOT_RETRYABLE', '只有失败或已关闭的任务可以重试');
       }
       const definition = this.definitionRow(original.app_id, original.task_key, { enabledOnly: true });
+      this.validateInput(definition, parseJson<unknown>(original.input_json));
       const now = Date.now();
       const id = randomUUID();
       this.db.prepare(`INSERT INTO tasks(
@@ -791,6 +841,13 @@ export class Store {
 
   // ---------- 调度 ----------
 
+  private validateCron(expression: string): void {
+    try { parseCron(expression); }
+    catch (error) {
+      throw new PlatformError(400, 'INVALID_CRON', error instanceof Error ? error.message : 'cron 表达式无效');
+    }
+  }
+
   createSchedule(appId: string, taskKey: string, input: unknown, cronExpression: string,
     timezone: string, enabled = true): ReturnType<Store['toSchedule']> {
     const definition = this.definitionRow(appId, taskKey, { enabledOnly: true });
@@ -798,11 +855,8 @@ export class Store {
       throw new PlatformError(400, 'TASK_NOT_SCHEDULABLE', '该任务定义不允许调度');
     }
     const inputValue = input === undefined ? {} : input;
-    const issues = validateJsonSchema(parseJson<JsonSchema>(definition.input_schema_json), inputValue);
-    if (issues.length > 0) {
-      throw new PlatformError(400, 'INVALID_INPUT', issues.map((issue) => `${issue.path} ${issue.message}`).join('；'));
-    }
-    parseCron(cronExpression);
+    const inputJson = this.validateInput(definition, inputValue);
+    this.validateCron(cronExpression);
     if (!validateTimezone(timezone)) throw new PlatformError(400, 'INVALID_TIMEZONE', '时区无效');
     const now = Date.now();
     const next = enabled ? nextFire(cronExpression, timezone, now) : null;
@@ -814,7 +868,7 @@ export class Store {
       this.db.prepare(`INSERT INTO schedules(id, app_id, task_key, input_json, cron_expression,
         timezone, enabled, next_fire_at, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        id, appId, taskKey, JSON.stringify(inputValue), cronExpression.trim(), timezone,
+        id, appId, taskKey, inputJson, cronExpression.trim(), timezone,
         enabled ? 1 : 0, next, now, now,
       );
       return this.getSchedule(id);
@@ -859,13 +913,10 @@ export class Store {
       const row = this.scheduleRow(id);
       const definition = this.definitionRow(row.app_id, row.task_key);
       const inputValue = patch.input === undefined ? parseJson<unknown>(row.input_json) : patch.input;
-      const issues = validateJsonSchema(parseJson<JsonSchema>(definition.input_schema_json), inputValue);
-      if (issues.length > 0) {
-        throw new PlatformError(400, 'INVALID_INPUT', issues.map((issue) => `${issue.path} ${issue.message}`).join('；'));
-      }
+      const inputJson = this.validateInput(definition, inputValue);
       const cronExpression = patch.cron === undefined ? row.cron_expression : patch.cron.trim();
       const timezone = patch.timezone === undefined ? row.timezone : patch.timezone;
-      parseCron(cronExpression);
+      this.validateCron(cronExpression);
       if (!validateTimezone(timezone)) throw new PlatformError(400, 'INVALID_TIMEZONE', '时区无效');
       const enabled = patch.enabled === undefined ? row.enabled === 1 : patch.enabled;
       const now = Date.now();
@@ -878,7 +929,7 @@ export class Store {
       }
       this.db.prepare(`UPDATE schedules SET input_json = ?, cron_expression = ?, timezone = ?,
         enabled = ?, next_fire_at = ?, updated_at = ? WHERE id = ?`).run(
-        JSON.stringify(inputValue), cronExpression, timezone, enabled ? 1 : 0, next, now, id,
+        inputJson, cronExpression, timezone, enabled ? 1 : 0, next, now, id,
       );
       return this.getSchedule(id);
     });
@@ -930,7 +981,7 @@ export class Store {
     this.db.prepare(`INSERT OR IGNORE INTO schedule_runs(
       id, schedule_id, planned_fire_time, status, task_id, reason, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
-      randomUUID(), scheduleId, plannedFireTime, status, taskId, reason, now,
+      randomUUID(), scheduleId, plannedFireTime, status, taskId, reason === null ? null : redactText(reason), now,
     );
   }
 
@@ -945,14 +996,15 @@ export class Store {
       return null;
     }
     const input = parseJson<unknown>(schedule.input_json);
-    const issues = validateJsonSchema(parseJson<JsonSchema>(definition.input_schema_json), input);
-    if (issues.length > 0) {
+    let inputJson: string;
+    try { inputJson = this.validateInput(definition, input); }
+    catch (error) {
+      if (!(error instanceof PlatformError)) throw error;
       this.insertScheduleRun(schedule.id, plannedFireTime, 'failed', null,
-        issues.map((issue) => `${issue.path} ${issue.message}`).join('；'), now);
+        `${error.code}: ${error.message}`, now);
       return null;
     }
     const id = randomUUID();
-    const inputJson = JSON.stringify(input);
     this.db.prepare(`INSERT INTO tasks(
       id, app_id, task_key, source, schedule_id, planned_fire_time, origin_key,
       input_json, input_hash, idempotency_key, status, progress, created_at, updated_at,
@@ -996,7 +1048,7 @@ export class Store {
           this.advanceSchedule(schedule, planned, now);
         } catch (error) {
           this.insertScheduleRun(schedule.id, planned, 'failed', null,
-            error instanceof Error ? error.message.slice(0, 500) : '调度失败', now);
+            diagnosticMessage(error, 500), now);
           this.advanceSchedule(schedule, planned, now);
         }
       }

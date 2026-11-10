@@ -6,6 +6,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { migrateEpisodeIdentity, sourceIdentity } from './identity.ts';
+import { redactText } from '../redact.ts';
 
 export type PodcastShow = {
   show_id: string;
@@ -19,6 +21,8 @@ export type PodcastShow = {
   page_episode_count: number | null;
   coverage_status: string;
   episode_count: number;
+  /** 已有转写稿（transcription_transcripts）的单集数，按 episode 去重。 */
+  transcript_count: number;
   last_sync_at: string | null;
   last_sync_status: string | null;
   last_error: string | null;
@@ -222,6 +226,7 @@ export class PodcastStore {
     if (!showColumns.some((column) => column.name === 'archived_at')) {
       this.db.exec('ALTER TABLE podcast_shows ADD COLUMN archived_at INTEGER');
     }
+    migrateEpisodeIdentity(this.db);
   }
 
   close(): void {
@@ -246,7 +251,24 @@ export class PodcastStore {
     return row;
   }
 
-  private toShow(row: ShowRow & { episode_count?: number }): PodcastShow {
+  private hasTranscriptTable(): boolean {
+    return Boolean(this.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transcription_transcripts'",
+    ).get());
+  }
+
+  /**
+   * 「已有转写稿的单集数」子查询。
+   * 按 episode_id 去重（同一集重试会写多条任务），并以节目下的单集为准，
+   * 避免历史数据里 show_id 为空时漏算；转写表尚未创建时返回常量 0。
+   */
+  private transcriptCountSql(): string {
+    if (!this.hasTranscriptTable()) return '0';
+    return `(SELECT COUNT(DISTINCT t.episode_id) FROM transcription_transcripts t
+      JOIN podcast_episodes te ON te.id = t.episode_id WHERE te.show_id = s.id)`;
+  }
+
+  private toShow(row: ShowRow & { episode_count?: number; transcript_count?: number }): PodcastShow {
     return {
       show_id: row.id,
       url: row.url,
@@ -259,6 +281,7 @@ export class PodcastStore {
       page_episode_count: row.page_episode_count,
       coverage_status: row.coverage_status,
       episode_count: row.episode_count ?? 0,
+      transcript_count: row.transcript_count ?? 0,
       last_sync_at: iso(row.last_sync_at),
       last_sync_status: row.last_sync_status,
       last_error: row.last_error,
@@ -270,16 +293,18 @@ export class PodcastStore {
 
   getShow(id: string): PodcastShow {
     const row = this.db.prepare(`SELECT s.*, (SELECT COUNT(*) FROM podcast_episodes e
-      WHERE e.show_id = s.id) AS episode_count FROM podcast_shows s WHERE s.id = ?`).get(id) as
-      (ShowRow & { episode_count: number }) | undefined;
+      WHERE e.show_id = s.id) AS episode_count, ${this.transcriptCountSql()} AS transcript_count
+      FROM podcast_shows s WHERE s.id = ?`).get(id) as
+      (ShowRow & { episode_count: number; transcript_count: number }) | undefined;
     if (!row) throw new PodcastError(404, 'SHOW_NOT_FOUND', '节目不存在');
     return this.toShow(row);
   }
 
   getShowByUrl(url: string): PodcastShow | null {
     const row = this.db.prepare(`SELECT s.*, (SELECT COUNT(*) FROM podcast_episodes e
-      WHERE e.show_id = s.id) AS episode_count FROM podcast_shows s WHERE s.url = ?`).get(url) as
-      (ShowRow & { episode_count: number }) | undefined;
+      WHERE e.show_id = s.id) AS episode_count, ${this.transcriptCountSql()} AS transcript_count
+      FROM podcast_shows s WHERE s.url = ?`).get(url) as
+      (ShowRow & { episode_count: number; transcript_count: number }) | undefined;
     return row ? this.toShow(row) : null;
   }
 
@@ -380,7 +405,7 @@ export class PodcastStore {
     const now = Date.now();
     this.db.prepare(`UPDATE podcast_shows SET last_sync_at = ?, last_sync_status = ?,
       last_error = ?, updated_at = ?${input.coverageStatus ? ', coverage_status = ?' : ''} WHERE id = ?`).run(
-      now, input.status, input.error ?? null, now,
+      now, input.status, input.error == null ? null : redactText(input.error), now,
       ...(input.coverageStatus ? [input.coverageStatus] : []), id,
     );
   }
@@ -394,10 +419,6 @@ export class PodcastStore {
       for (const episode of episodes) {
         if (episode.sourceId && episode.title) unique.set(episode.sourceId, episode);
       }
-      const existing = new Set<string>();
-      const rows = this.db.prepare('SELECT source_id FROM podcast_episodes WHERE show_id = ? AND source = ?')
-        .all(showId, source) as Array<{ source_id: string }>;
-      for (const row of rows) existing.add(row.source_id);
       const now = Date.now();
       let inserted = 0;
       let updated = 0;
@@ -406,22 +427,32 @@ export class PodcastStore {
         duration_seconds, audio_url, image_url, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        source = CASE WHEN excluded.source = 'rss' THEN excluded.source ELSE podcast_episodes.source END,
+        source_id = CASE WHEN excluded.source = 'rss' THEN excluded.source_id ELSE podcast_episodes.source_id END,
         title = excluded.title,
-        description = excluded.description,
-        published_at = excluded.published_at,
-        duration_seconds = excluded.duration_seconds,
-        audio_url = excluded.audio_url,
-        image_url = excluded.image_url,
+        description = COALESCE(excluded.description, podcast_episodes.description),
+        published_at = COALESCE(excluded.published_at, podcast_episodes.published_at),
+        duration_seconds = COALESCE(excluded.duration_seconds, podcast_episodes.duration_seconds),
+        audio_url = COALESCE(excluded.audio_url, podcast_episodes.audio_url),
+        image_url = COALESCE(excluded.image_url, podcast_episodes.image_url),
         updated_at = excluded.updated_at`);
       for (const episode of unique.values()) {
-        const id = episodeId(showId, source, episode.sourceId);
+        const alias = episodeId(showId, source, episode.sourceId);
+        const key = sourceIdentity(episode.sourceId);
+        const matched = this.db.prepare(`SELECT e.id FROM podcast_episodes e WHERE e.show_id = ? AND (
+          e.id IN (SELECT episode_id FROM podcast_episode_aliases WHERE show_id = ? AND identity_key = ?)
+          OR (e.audio_url IS NOT NULL AND e.audio_url = ?)) ORDER BY e.created_at ASC, e.id ASC LIMIT 1`)
+          .get(showId, showId, key, episode.audioUrl) as { id: string } | undefined;
+        const id = matched?.id ?? alias;
         statement.run(
           id, showId, source, episode.sourceId, episode.title,
           text(episode.description, 10000), episode.publishedAt,
           episode.durationSeconds, text(episode.audioUrl, 5000), text(episode.imageUrl, 2000),
           now, now,
         );
-        if (existing.has(episode.sourceId)) updated += 1;
+        this.db.prepare('INSERT OR IGNORE INTO podcast_episode_aliases VALUES (?, ?, ?, ?)')
+          .run(alias, id, showId, key);
+        if (matched) updated += 1;
         else inserted += 1;
       }
       return { inserted, updated };
@@ -448,16 +479,50 @@ export class PodcastStore {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, input.taskId, input.showId, input.since, input.until, input.status,
       input.pageEpisodeCount ?? null, input.inserted, input.updated,
-      input.coverageStatus ?? null, input.error ?? null, input.startedAt, Date.now(),
+      input.coverageStatus ?? null, input.error == null ? null : redactText(input.error), input.startedAt, Date.now(),
     );
     return id;
   }
 
   listShows(): PodcastShow[] {
     const rows = this.db.prepare(`SELECT s.*, (SELECT COUNT(*) FROM podcast_episodes e
-      WHERE e.show_id = s.id) AS episode_count FROM podcast_shows s
-      ORDER BY s.created_at DESC, s.id DESC`).all() as Array<ShowRow & { episode_count: number }>;
+      WHERE e.show_id = s.id) AS episode_count, ${this.transcriptCountSql()} AS transcript_count
+      FROM podcast_shows s
+      ORDER BY s.created_at DESC, s.id DESC`)
+      .all() as Array<ShowRow & { episode_count: number; transcript_count: number }>;
     return rows.map((row) => this.toShow(row));
+  }
+
+  listShowsPage(options: { mode?: string; query?: string; archived?: boolean; page?: number; limit?: number } = {}) {
+    const active = "COALESCE((EXISTS (SELECT 1 FROM podcast_episodes e WHERE e.show_id = s.id) OR s.last_sync_status IN ('succeeded', 'partial')), 0)";
+    const counts = this.db.prepare(`SELECT
+      SUM(CASE WHEN ${active} THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN NOT ${active} AND s.archived_at IS NULL THEN 1 ELSE 0 END) AS candidate,
+      SUM(CASE WHEN NOT ${active} AND s.archived_at IS NOT NULL THEN 1 ELSE 0 END) AS archived
+      FROM podcast_shows s`).get() as { active: number | null; candidate: number | null; archived: number | null };
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (options.mode === 'active') where.push(active);
+    if (options.mode === 'candidate') {
+      where.push(`NOT ${active}`);
+      if (!options.archived) where.push('s.archived_at IS NULL');
+    }
+    if (options.query) {
+      where.push('(s.title LIKE ? OR s.author LIKE ? OR s.url LIKE ?)');
+      params.push(...Array(3).fill(`%${options.query}%`));
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM podcast_shows s ${whereSql}`).get(...params) as { count: number }).count;
+    const limit = Number.isSafeInteger(options.limit) ? Math.min(100, Math.max(1, options.limit!)) : 20;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const page = Number.isSafeInteger(options.page) ? Math.min(pages, Math.max(1, options.page!)) : 1;
+    const rows = this.db.prepare(`SELECT s.*, (SELECT COUNT(*) FROM podcast_episodes e WHERE e.show_id = s.id) AS episode_count,
+      ${this.transcriptCountSql()} AS transcript_count
+      FROM podcast_shows s ${whereSql} ORDER BY s.created_at DESC, s.id DESC LIMIT ? OFFSET ?`)
+      .all(...params, limit, (page - 1) * limit) as
+      Array<ShowRow & { episode_count: number; transcript_count: number }>;
+    return { shows: rows.map((row) => this.toShow(row)), total, page, pages,
+      counts: { active: counts.active ?? 0, candidate: counts.candidate ?? 0, archived: counts.archived ?? 0 } };
   }
 
   listEpisodes(showId: string, limit = 200): PodcastEpisode[] {
@@ -564,6 +629,7 @@ export class PodcastStore {
   }
 
   getEpisode(episodeId: string): (PodcastEpisode & { show_title: string | null }) | null {
+    episodeId = this.resolveEpisodeId(episodeId);
     const row = this.db.prepare(`SELECT e.*, s.title AS show_title FROM podcast_episodes e
       LEFT JOIN podcast_shows s ON s.id = e.show_id WHERE e.id = ?`).get(episodeId) as
       (EpisodeRow & { show_title: string | null }) | undefined;
@@ -581,6 +647,12 @@ export class PodcastStore {
       image_url: row.image_url,
       show_title: row.show_title,
     };
+  }
+
+  resolveEpisodeId(id: string): string {
+    const row = this.db.prepare('SELECT episode_id FROM podcast_episode_aliases WHERE alias_id = ?').get(id) as
+      { episode_id: string } | undefined;
+    return row?.episode_id ?? id;
   }
 
   listRuns(showId?: string, limit = 50): PodcastRun[] {

@@ -2,8 +2,11 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
+import { diagnosticMessage } from '../redact.ts';
 
 export type QueueStatus = 'pending' | 'running' | 'done' | 'failed' | 'canceled';
+export type QueuePhase = 'submitting' | 'transcribing' | 'saving' | null;
 
 export type QueueItem = {
   id: string;
@@ -12,8 +15,12 @@ export type QueueItem = {
   audio_url: string;
   position: number;
   enabled: boolean;
+  force: boolean;
   status: QueueStatus;
   task_id: string | null;
+  request_key: string;
+  submission_json: string | null;
+  phase: QueuePhase;
   progress: number;
   error: string | null;
   created_at: number;
@@ -24,7 +31,8 @@ export type QueueItem = {
 
 type QueueRow = {
   id: string; show_id: string; title: string; audio_url: string; position: number;
-  enabled: number; status: QueueStatus; task_id: string | null; progress: number;
+  enabled: number; force: number; status: QueueStatus; task_id: string | null; progress: number;
+  request_key: string; submission_json: string | null; phase: QueuePhase;
   error: string | null; created_at: number; updated_at: number;
   started_at: number | null; finished_at: number | null;
 };
@@ -33,6 +41,7 @@ function toItem(row: QueueRow): QueueItem {
   return {
     ...row,
     enabled: row.enabled === 1,
+    force: row.force === 1,
   };
 }
 
@@ -68,6 +77,24 @@ export class TranscriptionQueueStore {
         value TEXT NOT NULL
       );
     `);
+    const columns = this.db.prepare('PRAGMA table_info(transcription_queue)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'request_key')) {
+      this.db.exec('ALTER TABLE transcription_queue ADD COLUMN request_key TEXT');
+    }
+    if (!columns.some((column) => column.name === 'phase')) {
+      this.db.exec('ALTER TABLE transcription_queue ADD COLUMN phase TEXT');
+    }
+    if (!columns.some((column) => column.name === 'force')) {
+      this.db.exec('ALTER TABLE transcription_queue ADD COLUMN force INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!columns.some((column) => column.name === 'submission_json')) {
+      this.db.exec('ALTER TABLE transcription_queue ADD COLUMN submission_json TEXT');
+    }
+    const missingKeys = this.db.prepare('SELECT id FROM transcription_queue WHERE request_key IS NULL').all() as Array<{ id: string }>;
+    for (const row of missingKeys) {
+      this.db.prepare('UPDATE transcription_queue SET request_key = ? WHERE id = ? AND request_key IS NULL')
+        .run(randomUUID(), row.id);
+    }
   }
 
   close(): void {
@@ -80,12 +107,37 @@ export class TranscriptionQueueStore {
     return rows.map(toItem);
   }
 
+  listPage(options: { page?: number; limit?: number; query?: string; showId?: string; status?: string } = {}) {
+    const limit = Number.isSafeInteger(options.limit) ? Math.min(100, Math.max(1, options.limit!)) : 20;
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (options.status && ['pending', 'running', 'failed', 'canceled', 'done'].includes(options.status)) {
+      clauses.push('q.status = ?'); params.push(options.status);
+    } else if (options.status !== 'all') clauses.push("q.status NOT IN ('done', 'canceled')");
+    if (options.showId) { clauses.push('q.show_id = ?'); params.push(options.showId); }
+    if (options.query) {
+      clauses.push('(q.title LIKE ? OR q.id LIKE ? OR s.title LIKE ?)');
+      params.push(...Array(3).fill(`%${options.query}%`));
+    }
+    const from = 'FROM transcription_queue q LEFT JOIN podcast_shows s ON s.id = q.show_id';
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params) as { count: number }).count;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    const page = Number.isSafeInteger(options.page) ? Math.min(pages, Math.max(1, options.page!)) : 1;
+    const rows = this.db.prepare(`SELECT q.*, s.title AS show_title ${from} ${where}
+      ORDER BY q.position ASC, q.created_at ASC, q.id ASC LIMIT ? OFFSET ?`).all(...params, limit, (page - 1) * limit) as
+      Array<QueueRow & { show_title: string | null }>;
+    const shows = this.db.prepare(`SELECT DISTINCT q.show_id, COALESCE(s.title, q.show_id) AS title ${from}
+      ORDER BY title`).all() as Array<{ show_id: string; title: string }>;
+    return { items: rows.map(toItem), total, page, pages, limit, shows };
+  }
+
   get(id: string): QueueItem | null {
     const row = this.db.prepare('SELECT * FROM transcription_queue WHERE id = ?').get(id) as QueueRow | undefined;
     return row ? toItem(row) : null;
   }
 
-  add(items: Array<{ episode_id: string; show_id: string; title: string; audio_url: string }>): {
+  add(items: Array<{ episode_id: string; show_id: string; title: string; audio_url: string; force?: boolean }>): {
     added: number; skipped: number;
   } {
     const now = Date.now();
@@ -95,15 +147,25 @@ export class TranscriptionQueueStore {
     try {
       let position = (this.db.prepare('SELECT COALESCE(MAX(position), 0) AS max FROM transcription_queue')
         .get() as { max: number }).max;
-      const exists = this.db.prepare('SELECT 1 FROM transcription_queue WHERE id = ?');
+      const exists = this.db.prepare('SELECT status FROM transcription_queue WHERE id = ?');
       const insert = this.db.prepare(`INSERT INTO transcription_queue
-        (id, show_id, title, audio_url, position, enabled, status, progress, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 1, 'pending', 0, ?, ?)`);
+        (id, show_id, title, audio_url, position, enabled, status, progress, created_at, updated_at, request_key, force)
+        VALUES (?, ?, ?, ?, ?, 1, 'pending', 0, ?, ?, ?, ?)`);
       for (const item of items) {
         if (!item.episode_id || !item.audio_url) { skipped += 1; continue; }
-        if (exists.get(item.episode_id)) { skipped += 1; continue; }
+        const existing = exists.get(item.episode_id) as { status: QueueStatus } | undefined;
+        if (existing) {
+          if (item.force && ['done', 'failed', 'canceled'].includes(existing.status)) {
+            this.db.prepare(`UPDATE transcription_queue SET status = 'pending', enabled = 1, force = 1,
+              task_id = NULL, phase = NULL, request_key = ?, submission_json = NULL, progress = 0, error = NULL,
+              started_at = NULL, finished_at = NULL, updated_at = ? WHERE id = ?`)
+              .run(randomUUID(), now, item.episode_id);
+            added += 1;
+          } else skipped += 1;
+          continue;
+        }
         position += 1;
-        insert.run(item.episode_id, item.show_id, item.title, item.audio_url, position, now, now);
+        insert.run(item.episode_id, item.show_id, item.title, item.audio_url, position, now, now, randomUUID(), item.force ? 1 : 0);
         added += 1;
       }
       this.db.exec('COMMIT');
@@ -172,9 +234,31 @@ export class TranscriptionQueueStore {
   markRunning(id: string, taskId: string): void {
     const now = Date.now();
     this.db.prepare(`UPDATE transcription_queue
-      SET status = 'running', task_id = ?, progress = 0, error = NULL,
-          started_at = ?, finished_at = NULL, updated_at = ? WHERE id = ?`)
+      SET status = 'running', phase = 'transcribing', task_id = ?, progress = 0, error = NULL,
+          started_at = COALESCE(started_at, ?), finished_at = NULL, updated_at = ? WHERE id = ?`)
       .run(taskId, now, now, id);
+  }
+
+  markSubmitting(id: string): void {
+    const now = Date.now();
+    this.db.prepare(`UPDATE transcription_queue SET status = 'running', phase = 'submitting',
+      started_at = COALESCE(started_at, ?), finished_at = NULL, updated_at = ? WHERE id = ?`)
+      .run(now, now, id);
+  }
+
+  saveSubmission(id: string, input: Record<string, unknown>): void {
+    this.db.prepare('UPDATE transcription_queue SET submission_json = COALESCE(submission_json, ?) WHERE id = ?')
+      .run(JSON.stringify(input), id);
+  }
+
+  markSaving(id: string): void {
+    this.db.prepare("UPDATE transcription_queue SET status = 'running', phase = 'saving', updated_at = ? WHERE id = ?")
+      .run(Date.now(), id);
+  }
+
+  setError(id: string, message: string | null): void {
+    this.db.prepare('UPDATE transcription_queue SET error = ?, updated_at = ? WHERE id = ?')
+      .run(message === null ? null : diagnosticMessage(message), Date.now(), id);
   }
 
   updateProgress(id: string, progress: number): void {
@@ -186,21 +270,21 @@ export class TranscriptionQueueStore {
   markDone(id: string): void {
     const now = Date.now();
     this.db.prepare(`UPDATE transcription_queue
-      SET status = 'done', progress = 100, error = NULL, finished_at = ?, updated_at = ? WHERE id = ?`)
+      SET status = 'done', phase = NULL, progress = 100, error = NULL, finished_at = ?, updated_at = ? WHERE id = ?`)
       .run(now, now, id);
   }
 
   markFailed(id: string, error: string): void {
     const now = Date.now();
     this.db.prepare(`UPDATE transcription_queue
-      SET status = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
-      .run(error.slice(0, 1000), now, now, id);
+      SET status = 'failed', phase = NULL, error = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
+      .run(diagnosticMessage(error), now, now, id);
   }
 
   markCanceled(id: string): void {
     const now = Date.now();
     this.db.prepare(`UPDATE transcription_queue
-      SET status = 'canceled', progress = 0, error = '已取消', finished_at = ?, updated_at = ? WHERE id = ?`)
+      SET status = 'canceled', phase = NULL, progress = 0, error = '已取消', finished_at = ?, updated_at = ? WHERE id = ?`)
       .run(now, now, id);
   }
 
@@ -209,9 +293,11 @@ export class TranscriptionQueueStore {
     if (!item) return null;
     if (item.status === 'running') throw new Error('任务运行中，不能重试');
     this.db.prepare(`UPDATE transcription_queue
-      SET status = 'pending', task_id = NULL, progress = 0, error = NULL,
+      SET force = CASE WHEN status = 'done' THEN 1 ELSE force END,
+          submission_json = CASE WHEN task_id IS NULL THEN submission_json ELSE NULL END,
+          status = 'pending', task_id = NULL, phase = NULL, request_key = ?, progress = 0, error = NULL,
           started_at = NULL, finished_at = NULL, updated_at = ? WHERE id = ?`)
-      .run(Date.now(), id);
+      .run(item.task_id ? randomUUID() : item.request_key, Date.now(), id);
     return this.get(id);
   }
 
@@ -236,6 +322,7 @@ export class TranscriptionQueueStore {
   }
 
   setState(key: string, value: string | null): void {
+    if (key === 'error' && value !== null) value = diagnosticMessage(value);
     if (value === null) {
       this.db.prepare('DELETE FROM transcription_queue_state WHERE key = ?').run(key);
       return;

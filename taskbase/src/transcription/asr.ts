@@ -1,9 +1,9 @@
 /** 本地转写 Provider：调用已安装的 OpenAI Whisper CLI，输出 JSON segments。 */
-import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import type { TranscriptSegment } from './store.ts';
+import { runProcess } from '../process.ts';
 
 export type AsrResult = {
   text: string;
@@ -17,7 +17,7 @@ export type AsrResult = {
 export type AsrProvider = {
   readonly name: string;
   readonly model: string;
-  transcribe(filePath: string, language?: string): Promise<AsrResult>;
+  transcribe(filePath: string, language?: string, signal?: AbortSignal): Promise<AsrResult>;
 };
 
 export type WhisperCliOptions = {
@@ -27,39 +27,6 @@ export type WhisperCliOptions = {
   initialPrompt?: string;
   timeoutMs?: number;
 };
-
-function run(command: string, args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGKILL');
-      reject(new Error(`ASR 进程超时（${Math.round(timeoutMs / 1000)} 秒）`));
-    }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-      if (stderr.length > 16_000) stderr = stderr.slice(-16_000);
-    });
-    child.on('error', (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`ASR 进程退出码 ${code}：${stderr.slice(-1000)}`));
-    });
-  });
-}
 
 export class WhisperCliProvider implements AsrProvider {
   readonly name = 'whisper-cli';
@@ -78,7 +45,7 @@ export class WhisperCliProvider implements AsrProvider {
     this.timeoutMs = options.timeoutMs ?? 6 * 60 * 60 * 1000;
   }
 
-  async transcribe(filePath: string, language = 'zh'): Promise<AsrResult> {
+  async transcribe(filePath: string, language = 'zh', signal?: AbortSignal): Promise<AsrResult> {
     const outputDir = await mkdtemp(join(tmpdir(), 'taskbase-whisper-'));
     try {
       const args = [
@@ -93,7 +60,7 @@ export class WhisperCliProvider implements AsrProvider {
         '--initial_prompt', this.initialPrompt,
       ];
       if (language && language !== 'auto') args.push('--language', language);
-      await run(this.command, args, this.timeoutMs);
+      await runProcess(this.command, args, { timeoutMs: this.timeoutMs, signal });
 
       const files = await readdir(outputDir);
       const expected = `${basename(filePath, extname(filePath))}.json`;

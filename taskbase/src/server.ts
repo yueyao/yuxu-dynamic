@@ -7,6 +7,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { sha256 } from './crypto.ts';
+import { diagnosticMessage } from './redact.ts';
 import { PlatformError, Store, type TaskStatus } from './store.ts';
 
 const MAX_JSON_BYTES = 8 * 1024 * 1024;
@@ -75,6 +76,7 @@ function requireUser(request: IncomingMessage, store: Store): { id: string } {
 function requireWorker(request: IncomingMessage, store: Store): { appId: string } {
   const worker = store.workerForToken(bearerToken(request));
   if (!worker) throw new PlatformError(401, 'UNAUTHENTICATED', 'Worker Token 无效');
+  store.markWorkerSeen(worker.appId);
   return worker;
 }
 
@@ -279,6 +281,7 @@ export function createPlatformServer(store: Store, options: PlatformServerOption
           scheduleId: url.searchParams.get('schedule_id') ?? undefined,
           limit,
           cursor: url.searchParams.get('cursor') ?? undefined,
+          summary: url.searchParams.get('summary') === '1',
         }), requestId);
       }
 
@@ -355,7 +358,7 @@ export function createPlatformServer(store: Store, options: PlatformServerOption
           if (typeof progress !== 'number' || !Number.isInteger(progress) || progress < 0 || progress > 100) {
             throw new PlatformError(400, 'INVALID_PROGRESS', 'progress 必须是 0–100 的整数');
           }
-          const message = typeof body.message === 'string' ? body.message.slice(0, 1000) : '';
+          const message = typeof body.message === 'string' ? diagnosticMessage(body.message) : '';
           store.progress(taskId, currentAttempt, worker.appId, progress, message);
           return sendJson(response, 200, { ok: true }, requestId);
         }
@@ -378,11 +381,13 @@ export function createPlatformServer(store: Store, options: PlatformServerOption
           return sendJson(response, 200, { ok: true }, requestId);
         }
         if (method === 'PUT' && action === 'artifacts') {
+          const limit = Math.min(maxArtifactBytes,
+            store.artifactMaxBytes(taskId, currentAttempt, worker.appId));
           const name = url.searchParams.get('name') ?? '';
           if (!/^[a-zA-Z0-9._-]{1,100}$/.test(name)) {
             throw new PlatformError(400, 'INVALID_FILENAME', '文件名只允许字母、数字、点、下划线和连字符');
           }
-          const data = await readBody(request, maxArtifactBytes);
+          const data = await readBody(request, limit);
           const id = randomUUID();
           const file = join(options.artifactDir, id);
           await mkdir(options.artifactDir, { recursive: true, mode: 0o700 });
@@ -450,21 +455,21 @@ export function createPlatformServer(store: Store, options: PlatformServerOption
       const known = error instanceof PlatformError;
       const status = known ? error.status : 500;
       const code = known ? error.code : 'INTERNAL_ERROR';
-      const message = known ? error.message : '服务器内部错误';
-      if (!known) console.error(`[${requestId}]`, error);
+      const message = known ? diagnosticMessage(error) : '服务器内部错误';
+      if (!known) console.error(`[${requestId}]`, diagnosticMessage(error));
       sendJson(response, status, { error: { code, message, request_id: requestId } }, requestId);
     }
   });
 
   const timer = setInterval(() => {
     try { store.sweep(); }
-    catch (error) { console.error('任务回收失败', error); }
+    catch (error) { console.error('任务回收失败', diagnosticMessage(error)); }
   }, options.sweepMs ?? 5_000);
   timer.unref();
 
   const scheduler = setInterval(() => {
     try { store.schedulerTick(Date.now(), options.scheduleGraceMs ?? 5 * 60_000); }
-    catch (error) { console.error('调度扫描失败', error); }
+    catch (error) { console.error('调度扫描失败', diagnosticMessage(error)); }
   }, options.schedulerMs ?? 5_000);
   scheduler.unref();
   server.on('close', () => {

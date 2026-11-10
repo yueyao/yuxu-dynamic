@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { envValue } from './env.ts';
+import { diagnosticMessage } from './redact.ts';
 
 type Session = { server: string; token: string };
 
@@ -118,10 +119,10 @@ function print(value: unknown): void {
 }
 
 async function promptPassword(): Promise<string> {
-  if (process.env.YUXUN_PASSWORD) return process.env.YUXUN_PASSWORD;
-  if (process.env.TASKBASE_PASSWORD) return process.env.TASKBASE_PASSWORD;
+  const password = envValue('YUXUN_PASSWORD', 'TASKBASE_PASSWORD');
+  if (password) return password;
   if (!process.stdin.isTTY || !process.stdin.setRawMode) {
-    throw new Error('非交互环境请设置 TASKBASE_PASSWORD');
+    throw new Error('非交互环境请设置 YUXUN_PASSWORD（兼容 TASKBASE_PASSWORD）');
   }
   return new Promise<string>((resolvePassword, reject) => {
     const bytes: number[] = [];
@@ -175,7 +176,14 @@ async function taskInput(args: string[]): Promise<unknown> {
     raw = await readFile(path, 'utf8');
     if (Buffer.byteLength(raw) > MAX_INPUT_BYTES) throw new Error('任务输入超过 64 KiB');
   }
-  try { return JSON.parse(raw) as unknown; } catch { throw new Error('任务输入不是有效 JSON'); }
+  if (Buffer.byteLength(raw, 'utf8') > MAX_INPUT_BYTES) throw new Error('任务输入超过 64 KiB');
+  let input: unknown;
+  try { input = JSON.parse(raw) as unknown; } catch { throw new Error('任务输入不是有效 JSON'); }
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('任务输入必须是 JSON 对象');
+  }
+  if (Buffer.byteLength(JSON.stringify(input), 'utf8') > MAX_INPUT_BYTES) throw new Error('任务输入超过 64 KiB');
+  return input;
 }
 
 async function waitTask(server: string, token: string, taskId: string, timeoutSeconds: number): Promise<unknown> {
@@ -354,6 +362,7 @@ type QueueSnapshot = {
   paused: boolean;
   error: string | null;
   runner: boolean;
+  total?: number;
   items: Array<{
     id: string; show_id: string; show_title?: string | null; title: string;
     status: string; progress: number; enabled: boolean; task_id: string | null;
@@ -393,8 +402,9 @@ function printQueue(snapshot: QueueSnapshot, args: string[]): void {
       item.task_id ?? '—',
     ].join('\t'));
   }
-  if (!has(args, '--all') && rows.length > shown.length) {
-    console.log(`\n还有 ${rows.length - shown.length} 条待处理；yuxun ps --all 查看全部`);
+  const total = snapshot.total ?? rows.length;
+  if (!has(args, '--all') && total > shown.length) {
+    console.log(`\n还有 ${total - shown.length} 条待处理；yuxun ps --all 查看全部`);
   }
 }
 
@@ -403,7 +413,13 @@ async function psCommand(args: string[]): Promise<void> {
   const token = await authenticated(server);
   if (!has(args, '--tasks')) {
     try {
-      const snapshot = (await request(server, '/api/v1/queue', { token })).data as QueueSnapshot;
+      const snapshot = (await request(server, `/api/v1/queue?limit=100${has(args, '--all') ? '&status=all' : ''}`, { token })).data as QueueSnapshot & { pages?: number };
+      if (has(args, '--all')) {
+        for (let page = 2; page <= (snapshot.pages ?? 1); page++) {
+          const next = (await request(server, `/api/v1/queue?limit=100&status=all&page=${page}`, { token })).data as QueueSnapshot;
+          snapshot.items.push(...next.items);
+        }
+      }
       printQueue(snapshot, args);
       return;
     } catch {
@@ -762,6 +778,6 @@ async function main(args = process.argv.slice(2)): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error((error as Error).message);
+  console.error(diagnosticMessage(error));
   process.exitCode = 1;
 });

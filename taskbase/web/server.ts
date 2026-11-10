@@ -13,7 +13,10 @@ import { PODCAST_APP_ID, podcastManifest } from '../src/podcast/manifest.ts';
 import { TRANSCRIPTION_APP_ID, transcriptionManifest } from '../src/transcription/manifest.ts';
 import { TranscriptionStore } from '../src/transcription/store.ts';
 import { TranscriptionQueueStore } from '../src/transcription/queue.ts';
+import { TranscriptionRunner, type PlatformRequest } from '../src/transcription/runner.ts';
 import { renderTranscriptMarkdown } from '../src/transcription/markdown.ts';
+import { diagnosticMessage } from '../src/redact.ts';
+import { envValue } from '../src/env.ts';
 
 const MAX_JSON_BYTES = 256 * 1024;
 const DEFAULT_PUBLIC_DIR = resolve(fileURLToPath(new URL('.', import.meta.url)), 'public');
@@ -27,6 +30,7 @@ export type WebServerOptions = {
   publicDir?: string;
   sessionTtlMs?: number;
   cookieSecure?: boolean;
+  publicUrl?: string;
   fetchImpl?: typeof fetch;
   transcriptApiToken?: string;
   platformOwnerUsername?: string;
@@ -117,22 +121,6 @@ function getPathSuffix(path: string, prefix: string): string | null {
   return path.slice(prefix.length) || '/';
 }
 
-function transcriptMetadata(transcript: ReturnType<TranscriptionStore['list']>[number]): Record<string, unknown> {
-  return {
-    transcript_id: transcript.transcript_id,
-    task_id: transcript.task_id,
-    episode_id: transcript.episode_id,
-    show_id: transcript.show_id,
-    title: transcript.title,
-    language: transcript.language,
-    provider: transcript.provider,
-    model: transcript.model,
-    duration_seconds: transcript.duration_seconds,
-    segments: transcript.segments.length,
-    created_at: transcript.created_at,
-  };
-}
-
 function transcriptMarkdown(transcript: ReturnType<TranscriptionStore['list']>[number]): string {
   return renderTranscriptMarkdown({
     title: transcript.title,
@@ -158,19 +146,23 @@ function sendMarkdown(response: ServerResponse, filename: string, markdown: stri
 export function createWebServer(options: WebServerOptions): Server {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
   const sessionTtlMs = options.sessionTtlMs ?? 30 * 24 * 60 * 60 * 1000;
-  const cookieSecure = options.cookieSecure ?? process.env.TASKBASE_WEB_COOKIE_SECURE === '1';
+  const publicUrl = options.publicUrl ?? envValue('YUXUN_PUBLIC_URL', 'TASKBASE_PUBLIC_URL');
+  if (publicUrl && new URL(publicUrl).protocol !== 'https:') {
+    throw new Error('公网入口 YUXUN_PUBLIC_URL 必须使用 HTTPS');
+  }
+  const cookieSecure = options.cookieSecure ?? (Boolean(publicUrl)
+    || envValue('YUXUN_WEB_COOKIE_SECURE', 'TASKBASE_WEB_COOKIE_SECURE') === '1');
   const fetchImpl = options.fetchImpl ?? fetch;
   const store = new PodcastStore(options.dbPath);
   const transcriptionStore = new TranscriptionStore(options.dbPath);
   const transcriptionQueue = new TranscriptionQueueStore(options.dbPath);
   const transcriptApiToken = options.transcriptApiToken
-    ?? process.env.TASKBASE_TRANSCRIPT_API_TOKEN ?? '';
+    ?? envValue('YUXUN_TRANSCRIPT_API_TOKEN', 'TASKBASE_TRANSCRIPT_API_TOKEN', '') as string;
   let serviceToken: string | null = null;
-  let queueTicking = false;
   const ownerUsername = options.platformOwnerUsername
-    ?? process.env.TASKBASE_OWNER_USERNAME ?? 'owner';
+    ?? envValue('YUXUN_OWNER_USERNAME', 'TASKBASE_OWNER_USERNAME', 'owner') as string;
   const ownerPassword = options.platformOwnerPassword
-    ?? process.env.TASKBASE_OWNER_PASSWORD ?? '';
+    ?? envValue('YUXUN_OWNER_PASSWORD', 'TASKBASE_OWNER_PASSWORD', '') as string;
   const sessions = new Map<string, Session>();
   const loginAttempts = new Map<string, LoginAttempt>();
   const sessionDb = new DatabaseSync(options.dbPath);
@@ -220,6 +212,7 @@ export function createWebServer(options: WebServerOptions): Server {
     '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
     '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
     '/app.js': { file: 'app.js', type: 'text/javascript; charset=utf-8' },
+    '/pagination.js': { file: 'pagination.js', type: 'text/javascript; charset=utf-8' },
     '/styles.css': { file: 'styles.css', type: 'text/css; charset=utf-8' },
   };
 
@@ -270,22 +263,18 @@ export function createWebServer(options: WebServerOptions): Server {
     path: string, url: URL): Promise<void> {
     if (method !== 'GET') throw new WebError(405, 'METHOD_NOT_ALLOWED', '只支持 GET');
     if (path === '/api/v1/queue') {
-      const titles = new Map(store.listShows().map((show) => [show.show_id, show.title]));
       return sendJson(response, 200, {
+        ...queuePage(url),
         counts: transcriptionQueue.counts(),
         paused: transcriptionQueue.getState('paused') === '1',
         error: transcriptionQueue.getState('error'),
         runner: transcriptionQueue.getState('active') === '1',
-        items: transcriptionQueue.list().map((item) => ({
-          ...item,
-          show_title: titles.get(item.show_id) ?? null,
-        })),
       });
     }
     if (path === '/api/v1/transcripts') {
       const rawLimit = Number(url.searchParams.get('limit') ?? '20');
       const rawOffset = Number(url.searchParams.get('cursor') ?? '0');
-      const { items, next_offset } = transcriptionStore.listPage({
+      const { items, next_offset, total } = transcriptionStore.listMetadataPage({
         limit: Number.isFinite(rawLimit) ? rawLimit : 20,
         offset: Number.isFinite(rawOffset) ? rawOffset : 0,
         showId: url.searchParams.get('show_id') ?? undefined,
@@ -293,7 +282,8 @@ export function createWebServer(options: WebServerOptions): Server {
         query: url.searchParams.get('q')?.trim() || undefined,
       });
       return sendJson(response, 200, {
-        transcripts: items.map(transcriptMetadata),
+        transcripts: items,
+        total,
         next_cursor: next_offset === null ? null : String(next_offset),
       });
     }
@@ -315,12 +305,13 @@ export function createWebServer(options: WebServerOptions): Server {
   }
 
   async function platformJson<T = any>(path: string, init: {
-    method?: string; token?: string; body?: unknown;
+    method?: string; token?: string; body?: unknown; idempotencyKey?: string;
   } = {}): Promise<T> {
     const response = await fetchImpl(new URL(path, options.platformUrl), {
       method: init.method ?? 'GET',
       headers: {
         ...(init.token ? { authorization: `Bearer ${init.token}` } : {}),
+        ...(init.idempotencyKey ? { 'idempotency-key': init.idempotencyKey } : {}),
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
@@ -364,111 +355,27 @@ export function createWebServer(options: WebServerOptions): Server {
     }
   }
 
-  async function queueTick(): Promise<void> {
-    if (queueTicking) return;
-    queueTicking = true;
+  const queueRequest: PlatformRequest = async (path, init = {}) => {
+    const token = await servicePlatformToken();
+    if (!token) throw new WebError(503, 'QUEUE_AUTH_UNAVAILABLE', '服务端未配置有效的 Owner 凭据，队列等待恢复');
     try {
-      const token = await servicePlatformToken();
-      if (!token) {
-        transcriptionQueue.setState('paused', '1');
-        transcriptionQueue.setState('error', '服务端未配置 Owner 密码，队列无法自动推进');
-        return;
-      }
-      const running = transcriptionQueue.running();
-      if (running?.task_id) {
-        let task: { status: string; progress?: number; error?: string | null; close_reason?: string | null };
-        try {
-          task = await platformJson(`/v1/tasks/${encodeURIComponent(running.task_id)}`,
-            { token });
-        } catch (error) {
-          if (error instanceof WebError && error.status === 401) {
-            serviceToken = null;
-            transcriptionQueue.setState('active', '0');
-            transcriptionQueue.setState('paused', '1');
-            transcriptionQueue.setState('error', '平台登录已失效，请检查 Owner 密码');
-          }
-          return;
-        }
-        transcriptionQueue.updateProgress(running.id, task.progress ?? 0);
-        if (task.status === 'succeeded') {
-          try {
-            await saveTranscriptFromTask(running.task_id, running, token);
-          } catch (error) {
-            console.error('保存转写稿失败', error);
-          }
-          transcriptionQueue.markDone(running.id);
-        } else if (task.status === 'failed') {
-          transcriptionQueue.markFailed(running.id, task.error ?? '任务失败');
-        } else if (task.status === 'closed') {
-          transcriptionQueue.markFailed(running.id, task.close_reason ?? '任务已关闭');
-        } else if (task.status === 'queued' && running.started_at
-          && Date.now() - running.started_at > 10 * 60 * 1000) {
-          await platformJson(`/v1/tasks/${encodeURIComponent(running.task_id)}/close`, {
-            method: 'POST', token, body: { reason: 'worker offline' },
-          }).catch(() => {});
-          transcriptionQueue.markFailed(running.id, 'Worker 10 分钟内未领取，队列已暂停');
-          transcriptionQueue.setState('paused', '1');
-          transcriptionQueue.setState('error', 'Worker 未领取任务，请确认 Worker 在线后点击继续');
-        }
-        return;
-      }
-
-      if (transcriptionQueue.getState('active') !== '1'
-        || transcriptionQueue.getState('paused') === '1') return;
-      const next = transcriptionQueue.next();
-      if (!next) return;
-      try {
-        const created = await platformCreateTask(token,
-          `${TRANSCRIPTION_APP_ID}/episode/transcribe`, {
-            audio_url: next.audio_url,
-            episode_id: next.id,
-            show_id: next.show_id,
-            title: next.title,
-            language: 'zh',
-          }, '转写应用');
-        transcriptionQueue.markRunning(next.id, created.task.task_id);
-        transcriptionQueue.setState('error', null);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '提交任务失败';
-        transcriptionQueue.markFailed(next.id, message);
-        transcriptionQueue.setState('error', message);
-        transcriptionQueue.setState('paused', '1');
-      }
-    } finally {
-      queueTicking = false;
+      return await platformJson(path, { ...init, token });
+    } catch (error) {
+      if (error instanceof WebError && error.status === 401) serviceToken = null;
+      throw error;
     }
-  }
-
-  async function saveTranscriptFromTask(taskId: string,
-    item: { id: string; show_id: string; title: string }, token: string): Promise<boolean> {
-    if (transcriptionStore.getByTask(taskId)) return false;
-    const result = await platformJson<{ output?: Record<string, unknown> }>(
-      `/v1/tasks/${encodeURIComponent(taskId)}/result`, { token });
-    const output = result.output ?? {};
-    if (typeof output.text !== 'string' || output.text.length === 0) return false;
-    transcriptionStore.save({
-      taskId,
-      episodeId: item.id,
-      showId: item.show_id,
-      title: item.title,
-      language: typeof output.language === 'string' ? output.language : 'zh',
-      provider: typeof output.provider === 'string' ? output.provider : 'whisper-cli',
-      model: typeof output.model === 'string' ? output.model : '',
-      durationSeconds: typeof output.duration_seconds === 'number' ? output.duration_seconds : null,
-      text: output.text,
-      segments: Array.isArray(output.segments)
-        ? output.segments as Array<{ start: number; end: number; text: string }>
-        : [],
-      artifactId: typeof output.artifact_id === 'string' ? output.artifact_id : null,
-    });
-    return true;
-  }
+  };
+  const runner = new TranscriptionRunner(transcriptionQueue, transcriptionStore, queueRequest,
+    (id) => store.resolveEpisodeId(id));
+  const queueTick = () => runner.tick().catch((error) => console.error('队列推进失败', diagnosticMessage(error)));
 
   async function proxyPlatform(request: IncomingMessage, response: ServerResponse, session: Session,
     suffix: string, search: string): Promise<void> {
     const path = `/v1${suffix}${search}`;
     const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await readBody(request, 5 * 1024 * 1024);
-    const platformResponse = await fetchImpl(new URL(path, options.platformUrl), {
+    let platformResponse: Response;
+    try {
+      platformResponse = await fetchImpl(new URL(path, options.platformUrl), {
       method: request.method,
       headers: {
         authorization: `Bearer ${session.token}`,
@@ -476,12 +383,29 @@ export function createWebServer(options: WebServerOptions): Server {
       },
       ...(body === undefined ? {} : { body: new Uint8Array(body) }),
       signal: AbortSignal.timeout(60_000),
-    });
+      });
+    } catch (error) {
+      const timeout = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name);
+      throw new WebError(timeout ? 504 : 502, timeout ? 'PLATFORM_TIMEOUT' : 'PLATFORM_UNAVAILABLE',
+        timeout ? '平台请求超时，请稍后重试' : '平台暂不可用，请稍后重试');
+    }
     const contentType = platformResponse.headers.get('content-type') ?? 'application/json; charset=utf-8';
     const headers: Record<string, string> = { 'cache-control': 'no-store', 'content-type': contentType };
     const disposition = platformResponse.headers.get('content-disposition');
     if (disposition) headers['content-disposition'] = disposition;
-    const data = Buffer.from(await platformResponse.arrayBuffer());
+    let data: Buffer;
+    try {
+      data = Buffer.from(await platformResponse.arrayBuffer());
+    } catch {
+      throw new WebError(502, 'PLATFORM_UNAVAILABLE', '平台响应中断，请稍后重试');
+    }
+    if (!platformResponse.ok) {
+      let error: { code?: unknown; message?: unknown } | undefined;
+      try { error = (JSON.parse(data.toString('utf8')) as { error?: typeof error }).error; } catch {}
+      throw new WebError(platformResponse.status,
+        typeof error?.code === 'string' ? error.code : 'PLATFORM_ERROR',
+        typeof error?.message === 'string' ? error.message : '平台请求失败');
+    }
     response.writeHead(platformResponse.status, headers);
     response.end(data);
   }
@@ -493,6 +417,7 @@ export function createWebServer(options: WebServerOptions): Server {
 
   const server = createServer(async (request, response) => {
     const requestId = randomUUID();
+    response.setHeader('x-request-id', requestId);
     const started = Date.now();
     response.once('finish', () => {
       const record = {
@@ -587,7 +512,7 @@ export function createWebServer(options: WebServerOptions): Server {
       if (platformSuffix !== null) {
         const session = requireSession(request);
         if (method !== 'GET' && method !== 'HEAD') requireCsrf(request, session);
-        return proxyPlatform(request, response, session, platformSuffix, url.search);
+        return await proxyPlatform(request, response, session, platformSuffix, url.search);
       }
 
       if (path.startsWith('/api/podcast/')) {
@@ -614,22 +539,29 @@ export function createWebServer(options: WebServerOptions): Server {
         return;
       }
       if (error instanceof WebError || error instanceof PodcastError) {
-        return sendJson(response, error.status, { error: { code: error.code, message: error.message } });
+        return sendJson(response, error.status, { error: { code: error.code, message: diagnosticMessage(error) } });
       }
-      console.error(`[${requestId}]`, error);
+      console.error(`[${requestId}]`, diagnosticMessage(error));
       return sendJson(response, 500, { error: { code: 'INTERNAL_ERROR', message: '服务内部错误' } });
     }
   });
 
+  function queuePage(url: URL) {
+    if (url.searchParams.get('summary') === '1') return { items: [] };
+    return transcriptionQueue.listPage({
+      page: Number(url.searchParams.get('page') ?? 1),
+      limit: Number(url.searchParams.get('limit') ?? 20),
+      query: url.searchParams.get('q')?.trim() || undefined,
+      showId: url.searchParams.get('show_id') || undefined,
+      status: url.searchParams.get('status') || undefined,
+    });
+  }
+
   async function handleTranscriptionQueue(request: IncomingMessage, response: ServerResponse,
     session: Session, method: string, path: string): Promise<void> {
     if (method === 'GET' && path === '/api/transcription/queue') {
-      const titles = new Map(store.listShows().map((show) => [show.show_id, show.title]));
       return sendJson(response, 200, {
-        items: transcriptionQueue.list().map((item) => ({
-          ...item,
-          show_title: titles.get(item.show_id) ?? null,
-        })),
+        ...queuePage(new URL(request.url ?? '/', 'http://localhost')),
         counts: transcriptionQueue.counts(),
         paused: transcriptionQueue.getState('paused') === '1',
         error: transcriptionQueue.getState('error'),
@@ -658,6 +590,7 @@ export function createWebServer(options: WebServerOptions): Server {
         show_id: episode.show_id,
         title: episode.title,
         audio_url: episode.audio_url ?? '',
+        force,
       })));
       return sendJson(response, 200, {
         ...result,
@@ -690,26 +623,15 @@ export function createWebServer(options: WebServerOptions): Server {
       const limit = Number(new URL(request.url ?? '/', 'http://localhost').searchParams.get('limit') ?? '20');
       const offset = Number(new URL(request.url ?? '/', 'http://localhost').searchParams.get('cursor') ?? '0');
       const query = new URL(request.url ?? '/', 'http://localhost').searchParams.get('q')?.trim() || undefined;
-      const { items, next_offset } = transcriptionStore.listPage({
+      const { items, next_offset, total } = transcriptionStore.listMetadataPage({
         limit: Number.isFinite(limit) ? limit : 20,
         offset: Number.isFinite(offset) ? offset : 0,
         query,
       });
       return sendJson(response, 200, {
-        total: transcriptionStore.count(),
-        transcripts: items.map((transcript) => ({
-          transcript_id: transcript.transcript_id,
-          task_id: transcript.task_id,
-          episode_id: transcript.episode_id,
-          show_id: transcript.show_id,
+        total,
+        transcripts: items.map((transcript) => ({ ...transcript,
           show_title: transcript.show_id ? titles.get(transcript.show_id) ?? null : null,
-          title: transcript.title,
-          language: transcript.language,
-          provider: transcript.provider,
-          model: transcript.model,
-          duration_seconds: transcript.duration_seconds,
-          segments: transcript.segments.length,
-          created_at: transcript.created_at,
         })),
         next_cursor: next_offset === null ? null : String(next_offset),
       });
@@ -725,7 +647,6 @@ export function createWebServer(options: WebServerOptions): Server {
         throw new WebError(400, 'INVALID_ACTION', '不支持的批量操作');
       }
       if (ids.length === 0) throw new WebError(400, 'INVALID_INPUT', 'ids 不能为空');
-      const token = action === 'cancel' ? await servicePlatformToken() : null;
       let updated = 0;
       let skipped = 0;
       const errors: string[] = [];
@@ -750,14 +671,8 @@ export function createWebServer(options: WebServerOptions): Server {
               skipped += 1;
               continue;
             }
-            if (item.status === 'running' && item.task_id) {
-              if (!token) throw new Error('缺少平台凭据，无法关闭任务');
-              await platformJson(`/v1/tasks/${encodeURIComponent(item.task_id)}/close`, {
-                method: 'POST', token, body: { reason: '队列取消' },
-              }).catch(() => {});
-            }
-            transcriptionQueue.markCanceled(id);
-            updated += 1;
+            if (await runner.cancel(id)) updated += 1;
+            else skipped += 1;
           } else if (action === 'retry') {
             if (item.status !== 'failed' && item.status !== 'canceled') {
               skipped += 1;
@@ -855,6 +770,15 @@ export function createWebServer(options: WebServerOptions): Server {
     }
 
     if (path === '/api/podcast/shows' && method === 'GET') {
+      if (url.searchParams.has('page')) {
+        return sendJson(response, 200, store.listShowsPage({
+          mode: url.searchParams.get('mode') ?? undefined,
+          query: url.searchParams.get('q')?.trim() || undefined,
+          archived: url.searchParams.get('archived') === '1',
+          page: Number(url.searchParams.get('page') ?? 1),
+          limit: Number(url.searchParams.get('limit') ?? 20),
+        }));
+      }
       return sendJson(response, 200, { shows: store.listShows() });
     }
 
@@ -952,7 +876,7 @@ export function createWebServer(options: WebServerOptions): Server {
 
     const episodeTranscript = path.match(/^\/api\/podcast\/episodes\/([^/]+)\/transcript$/);
     if (episodeTranscript && method === 'GET') {
-      const episodeId = decodeURIComponent(episodeTranscript[1]);
+      const episodeId = store.resolveEpisodeId(decodeURIComponent(episodeTranscript[1]));
       const local = transcriptionStore.getByEpisode(episodeId);
       if (local) return sendJson(response, 200, { transcript: local });
 
@@ -1003,7 +927,9 @@ export function createWebServer(options: WebServerOptions): Server {
     if (episodesMatch && method === 'GET') {
       const limit = Number(url.searchParams.get('limit') ?? '200');
       return sendJson(response, 200, {
-        episodes: store.listEpisodes(decodeURIComponent(episodesMatch[1]), Number.isSafeInteger(limit) ? limit : 200),
+        ...store.listEpisodeLibrary({ showId: decodeURIComponent(episodesMatch[1]),
+          limit: Math.min(Number.isSafeInteger(limit) ? limit : 50, 100),
+          offset: Number(url.searchParams.get('offset') ?? 0) }),
       });
     }
 
@@ -1018,7 +944,11 @@ export function createWebServer(options: WebServerOptions): Server {
       const body = await readJson(request);
       const showIds = Array.isArray(body.show_ids)
         ? body.show_ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
-        : store.listShows().filter((show) => !show.archived_at).map((show) => show.show_id);
+        : store.listShows().filter((show) => {
+          if (show.archived_at) return false;
+          const active = show.episode_count > 0 || ['succeeded', 'partial'].includes(show.last_sync_status ?? '');
+          return body.show_scope === 'active' ? active : body.show_scope === 'candidate' ? !active : true;
+        }).map((show) => show.show_id);
       if (showIds.length === 0) throw new WebError(400, 'NO_SHOWS', '还没有可采集的节目');
       const since = optionalDate(body, 'since');
       const until = optionalDate(body, 'until');
@@ -1076,10 +1006,12 @@ export function createWebServer(options: WebServerOptions): Server {
     throw new WebError(404, 'NOT_FOUND', '播客接口不存在');
   }
 
+  let startupTimer: ReturnType<typeof setTimeout> | undefined;
   const resumeActive = transcriptionQueue.getState('active') === '1';
   const hadRunning = transcriptionQueue.running() !== null;
   if (resumeActive || hadRunning) {
-    setTimeout(() => { void queueTick(); }, 1000).unref();
+    startupTimer = setTimeout(() => { void queueTick(); }, 1000);
+    startupTimer.unref();
   }
 
   const cleanup = setInterval(() => {
@@ -1094,10 +1026,13 @@ export function createWebServer(options: WebServerOptions): Server {
   server.on('close', () => {
     clearInterval(cleanup);
     clearInterval(queueTimer);
-    transcriptionQueue.close();
-    transcriptionStore.close();
-    store.close();
-    sessionDb.close();
+    clearTimeout(startupTimer);
+    void runner.stop().then(() => {
+      transcriptionQueue.close();
+      transcriptionStore.close();
+      store.close();
+      sessionDb.close();
+    });
   });
   return server;
 }

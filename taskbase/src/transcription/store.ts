@@ -56,6 +56,7 @@ export class TranscriptionStore {
       );
       CREATE INDEX IF NOT EXISTS transcription_transcripts_episode
         ON transcription_transcripts(episode_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS transcription_transcripts_history ON transcription_transcripts(created_at DESC, id DESC);
     `);
   }
 
@@ -168,5 +169,26 @@ export class TranscriptionStore {
       items: rows.map((row) => this.toRecord(row)),
       next_offset: rows.length === limit ? offset + limit : null,
     };
+  }
+
+  listMetadataPage(options: Parameters<TranscriptionStore['listPage']>[0] = {}) {
+    const limit = Number.isSafeInteger(options.limit) ? Math.min(Math.max(options.limit!, 1), 100) : 20;
+    const offset = Number.isSafeInteger(options.offset) ? Math.max(options.offset!, 0) : 0;
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (options.showId) { clauses.push('show_id = ?'); params.push(options.showId); }
+    if (options.episodeId) { clauses.push('episode_id = ?'); params.push(options.episodeId); }
+    if (options.query) {
+      clauses.push('(title LIKE ? OR episode_id LIKE ?)');
+      params.push(`%${options.query}%`, `%${options.query}%`);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM transcription_transcripts ${where}`).get(...params) as { count: number }).count;
+    const rows = this.db.prepare(`SELECT id AS transcript_id, task_id, episode_id, show_id, title, language,
+      provider, model, duration_seconds, json_array_length(segments_json) AS segments, created_at
+      FROM transcription_transcripts ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as Array<Omit<TranscriptRecord, 'text' | 'segments' | 'artifact_id' | 'created_at'> & { segments: number; created_at: number }>;
+    return { items: rows.map((row) => ({ ...row, created_at: new Date(row.created_at).toISOString() })),
+      total, next_offset: offset + rows.length < total ? offset + limit : null };
   }
 }

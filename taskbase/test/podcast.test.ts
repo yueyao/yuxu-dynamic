@@ -4,10 +4,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { Readable } from 'node:stream';
+import { SafeHttpClient } from '../src/transcription/safe-http.ts';
 import { parseXiaoyuzhouShow } from '../src/podcast/parser.ts';
 import { parseFeedXml } from '../src/podcast/rss.ts';
 import { PodcastStore, normalizeShowUrl } from '../src/podcast/store.ts';
 import { executePodcastLease, filterEpisodes, normalizeDateRange } from '../src/podcast/worker.ts';
+import { TranscriptionStore } from '../src/transcription/store.ts';
 import type { WorkerClient, WorkerLease } from '../src/worker-sdk.ts';
 
 const fixturePath = new URL('./fixtures/xyz-show.html', import.meta.url);
@@ -88,6 +91,22 @@ test('播客表：新增、元数据、单集 upsert 与记录', async () => {
     assert.equal(store.listRuns(show.show_id).length, 1);
     assert.equal(store.overview().shows, 1);
     assert.equal(store.overview().episodes, 2);
+    assert.equal(updated.transcript_count, 0);
+
+    // 有转写稿的单集数：按 episode 去重，并随 getShow / listShows / listShowsPage 返回
+    const transcriptionStore = new TranscriptionStore(join(directory, 'taskbase.sqlite'));
+    const episodeId = store.listEpisodes(show.show_id)[0].episode_id;
+    for (const taskId of ['task-transcript-1', 'task-transcript-1-retry']) {
+      transcriptionStore.save({
+        taskId, episodeId, showId: show.show_id, title: 'B', language: 'zh',
+        provider: 'test', model: 'test', durationSeconds: 60, text: '文字稿',
+        segments: [], artifactId: null,
+      });
+    }
+    assert.equal(store.getShow(show.show_id).transcript_count, 1);
+    assert.equal(store.listShows()[0].transcript_count, 1);
+    assert.equal(store.listShowsPage({ limit: 10 }).shows[0].transcript_count, 1);
+    transcriptionStore.close();
   } finally {
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -100,7 +119,10 @@ test('播客 Worker 执行 collect：日期过滤、partial 标记、输出', as
   try {
     const show = store.addShow({ url: 'https://www.xiaoyuzhoufm.com/podcast/test', title: '待同步' });
     const html = await readFile(fixturePath, 'utf8');
-    const fetchImpl: typeof fetch = async () => new Response(html, { status: 200 });
+    const httpClient = new SafeHttpClient({
+      resolveHost: async () => [{ address: '93.184.216.34', family: 4 }],
+      request: async () => ({ statusCode: 200, headers: {}, body: Readable.from([html]) }),
+    });
     const calls: { progress: number[]; logs: string[]; completed: unknown; failed: string | null } = {
       progress: [], logs: [], completed: null, failed: null,
     };
@@ -119,7 +141,7 @@ test('播客 Worker 执行 collect：日期过滤、partial 标记、输出', as
       steps: {}, deadline_at: '2026-12-31T00:00:00.000Z', schedule_id: null, planned_fire_time: null,
     };
     await executePodcastLease(fake, lease, store, {
-      fetchImpl, now: () => Date.parse('2026-06-01T00:00:00.000Z'),
+      httpClient, now: () => Date.parse('2026-06-01T00:00:00.000Z'),
     });
     assert.equal(calls.failed, null);
     assert.ok(calls.completed);
