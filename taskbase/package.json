@@ -13,6 +13,7 @@
     "cli": "node src/cli.ts",
     "worker:demo": "node src/worker-demo.ts",
     "test": "node --test test/*.test.ts",
+    "smoke:web": "node scripts/smoke-web.ts",
     "web": "node web/main.ts",
     "worker:podcast": "node src/podcast/worker.ts",
     "seed:feeds": "node scripts/seed-feeds.ts",

@@ -1,0 +1,30 @@
+name: Taskbase checks
+
+on:
+  push:
+    paths: ['taskbase/**', '.github/workflows/taskbase.yml']
+  pull_request:
+    paths: ['taskbase/**', '.github/workflows/taskbase.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: taskbase
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: taskbase/package-lock.json
+      - run: npm ci
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm run typecheck
+      - run: node --check web/public/app.js && node --check web/public/pagination.js
+      - run: npm test
+      - run: npm run smoke:web
