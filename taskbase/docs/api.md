@@ -1,6 +1,6 @@
 # 转写稿对外 API
 
-更新：2026-11-07
+更新：2026-11-09
 Base URL：`http://43.156.253.152`
 定位：只读查询已入库的转写稿，供外部脚本或其他系统集成。
 
@@ -17,15 +17,19 @@ Token 来源：
 | 位置 | 说明 |
 | --- | --- |
 | 本机 `taskbase/.deploy/transcript-api-token` | 原始 Token |
-| 服务端 `/etc/taskbase/web.env` | `TASKBASE_TRANSCRIPT_API_TOKEN` |
+| 服务端 `/etc/taskbase/web.env` | `YUXUN_TRANSCRIPT_API_TOKEN`（兼容 `TASKBASE_TRANSCRIPT_API_TOKEN`，新别名优先） |
 
 Token 错误返回 `401 UNAUTHORIZED`；平台 Owner Token 也可以用于只读查询队列和转写稿。
+
+任务控制面 `/v1/tasks` 与调度的 input 必须是 JSON 对象，序列化后 UTF-8 不超过 65536 字节；超限返回 `413 INPUT_TOO_LARGE`。重试、调度更新及触发同样校验，平台结果和检查点保留 8 MiB HTTP 请求上限。产物上传取全局和任务定义上限的较小值，声明或实际字节超限返回 413。
 
 ## 转写队列
 
 ```http
 GET /api/v1/queue
 ```
+
+队列在服务端分页：`page` 默认 1，`limit` 默认 20（最多 100）；`q` 搜索节目/单集，`show_id` 按节目筛选，`status` 指定状态或 `all`。默认仅含待处理项（pending/running/failed），完整历史需传 `status=all` 并遍历所有页。返回 `total`、`page`、`pages`、`limit` 和节目筛选项 `shows`；`summary=1` 只读计数和启停状态，不返回队列项。
 
 返回 Web 转写队列快照：
 
@@ -67,6 +71,8 @@ GET /api/v1/transcripts
 | `show_id` | 按节目过滤 |
 | `episode_id` | 按单集过滤 |
 | `q` | 搜索单集标题 / episode id |
+
+响应的 `total` 是当前筛选下的总数。列表只返回摘要与片段数，详情/Markdown 接口读取完整文字稿。
 
 示例：
 

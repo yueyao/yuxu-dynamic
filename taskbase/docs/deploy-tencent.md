@@ -1,5 +1,7 @@
 # 腾讯云部署记录
 
+以下为历史部署记录；新的公网部署使用 [HTTPS 切换步骤](https.md)，数据保护和保留策略见 [运维文档](operations.md)。本次仓库修复未操作线上服务器。
+
 部署时间：2026-11-06  
 服务器：腾讯云 Lighthouse `lhins-iux3d3gt` / `43.156.253.152` / ap-singapore  
 系统：OpenCloudOS 9.4，Node 24.22.2

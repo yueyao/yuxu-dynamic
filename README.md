@@ -11,6 +11,7 @@ spec/       需求文档
 
 ## 文档
 
+- [当前项目规范与验收审查（范围已确认）](spec/taskbase-current-spec.md)
 - [Yuxun Web 使用文档](taskbase/docs/web.md)
 - [Yuxun CLI 使用文档](taskbase/docs/cli.md)
 - [Taskbase 文档导航](taskbase/docs/usage.md)

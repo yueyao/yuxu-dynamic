@@ -1,9 +1,10 @@
-# Taskbase 底座 v0.3 + 播客 Web + 本地转写
+# Taskbase v0.6 + 播客 Web + 本地转写
 
 位于 `yuxu-dynamic` 仓库中的独立 Taskbase 工程。
 
 > CLI 命令名：`yuxun`（Yuxun CLI）。
-> 使用说明：[Web 服务](docs/web.md) · [CLI](docs/cli.md) · [文档索引](docs/usage.md)。
+> 使用说明：[Web 服务](docs/web.md) · [CLI](docs/cli.md) · [HTTPS 部署](docs/https.md) · [备份与保留策略](docs/operations.md) · [文档索引](docs/usage.md)。
+> 当前行为、验收证据与范围决定：[项目规范与验收审查（2026-11-10 更新）](../spec/taskbase-current-spec.md)。本轮按现有功能交付，调度沿用当前规则，稿件入库以 Web 队列为准；生产运维验收暂缓。
 
 当前包含三层：
 
@@ -11,7 +12,7 @@
 - **播客应用**：`podcast_` 前缀表、小宇宙公开页解析、**RSS 解析**、一年范围列表采集、Podcast Worker
 - **Web 端**：平台管理后台 + 播客任务后台
 
-> 说明：这里按前文语境实现的是**播客（Podcast）**任务后台；如果你说的“博客”是 Blog 发布系统，需要另做领域层，当前 `podcast_` 模型不适用。
+播客（Podcast）应用保存节目与单集元数据；Blog 发布不在当前业务范围内。
 
 ## 技术栈
 
@@ -47,13 +48,15 @@
 - **播客任务后台**：内容库（节目库/候选节目）、单集库、采集与转写任务、单集列表、采集记录、每节目 schedule
 - 浏览器只拿 HttpOnly Session Cookie；平台 Owner Token 不进浏览器
 - CSRF 校验；Web 端平台代理；CSP 禁止内联脚本
-- 单用户 Session 保存在 Web Server 内存，重启后重新登录
+- 单用户 Session 持久化到 SQLite，默认 30 天，Web 重启后继续有效
+- 节目、队列、转写历史与任务列表在服务端分页；列表只返回转写摘要
+- 应用页显示 Worker 在线状态（90 秒内联系过）及最近联系时间
 
 ### 播客应用
 
 - 小宇宙公开节目页 `__NEXT_DATA__` 解析
 - 节目/单集列表入库；**不下载音频**
-- 支持 RSS/Atom；有 RSS 时按 RSS 完整历史入库
+- 支持 RSS/Atom；有 RSS 时读取 Feed，再按日期范围入库，默认最近一年
 - 没有 RSS 时回退公开页，通常只有 15 集，标记 `partial`
 - `podcast_shows` / `podcast_episodes` / `podcast_ingest_runs` 由应用自迁移
 - `show/sync` 可调度；`shows/collect` 用于批量采集
@@ -91,10 +94,11 @@ yuxun --help
 export TASKBASE_OWNER_PASSWORD='change-me-to-a-long-password'
 npm run bootstrap
 
-# 2. 启动平台 API（默认 127.0.0.1:3333）
+# 2. 启动平台 API（默认 127.0.0.1:3333，单独终端）
 npm run server
 
-# 3. 启动 Web 端（默认 127.0.0.1:3334）
+# 3. 启动 Web 端（默认 127.0.0.1:3334，单独终端）
+# Web 进程也须设置同一 TASKBASE_OWNER_PASSWORD，供服务端转写队列推进
 npm run web
 # 浏览器打开 http://127.0.0.1:3334，用 owner + 密码登录
 
@@ -103,7 +107,7 @@ export TASKBASE_WORKER_TOKEN='<Podcast Worker Token>'
 npm run worker:podcast
 
 # 5. 在 Web 节目库添加节目：
-#    - 填节目页链接 + RSS 链接（有 RSS 时优先全量入库）
+#    - 填节目页链接 + RSS 链接（有 RSS 时按指定日期范围采集）
 #    - 或只填节目页链接，回退公开页（通常只有 15 集，标 partial）
 #    然后点击“同步”或“采集一年”
 
@@ -133,7 +137,7 @@ yuxun transcribe '<audio-url>'
 
 ## 音频转写调研
 
-[音频转写能力调研报告](docs/transcription-research.md)：对比本地 FunASR/SenseVoice、faster-whisper、腾讯云、阿里云和 OpenAI 方案。当前已落地 **Whisper CLI 本地 Provider**；FunASR/MLX/云端 Provider 仍可替换。
+[音频转写能力调研报告](docs/transcription-research.md)：对比本地 FunASR/SenseVoice、faster-whisper、腾讯云、阿里云和 OpenAI 方案。当前默认使用 **Whisper CLI 本地 Provider**；FunASR / ElevenLabs 已有适配器与替身测试，MLX 尚未实现。研究报告中的比较不代表这些外部服务已在当前部署验收。
 
 ## RSS 来源
 
@@ -164,7 +168,7 @@ yuxun worker status
 
 ## 腾讯云部署
 
-已部署到腾讯云 Lighthouse：
+历史部署记录（本轮未重新核验线上状态）：
 
 - 外部地址：`http://43.156.253.152/`（nginx 80 按公网 IP 路由）
 - 专用端口：`3410`（已配置，但 Lighthouse 防火墙尚未放行）
@@ -230,19 +234,22 @@ yuxun transcribe 'https://example.com/audio.mp3' --no-wait
 
 ## 配置
 
+对应别名统一遵循 `显式参数 > YUXUN_* > TASKBASE_* > 默认值`，旧变量继续兼容。新变量为空时不回退旧值；数值空串采用默认值，空凭据按未配置处理。以下平台配置推荐使用 `YUXUN_*`。
+
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `YUXUN_DATA_DIR` / `TASKBASE_DATA_DIR` | `.data` | 数据目录（DB、产物） |
-| `TASKBASE_HOST` / `TASKBASE_PORT` | `127.0.0.1` / `3333` | 平台 API 监听地址 |
+| `YUXUN_HOST` / `YUXUN_PORT` | `127.0.0.1` / `3333` | 平台 API 监听地址；兼容同名 `TASKBASE_*` |
 | `YUXUN_URL` / `TASKBASE_URL` | `http://127.0.0.1:3333` | CLI / Worker 访问平台 API |
-| `TASKBASE_WEB_HOST` / `TASKBASE_WEB_PORT` | `127.0.0.1` / `3334` | Web 端监听地址 |
-| `TASKBASE_WEB_SESSION_TTL_MS` | `43200000`（12 小时） | Web 会话有效期 |
-| `TASKBASE_WEB_COOKIE_SECURE` | 无 | 设为 `1` 时 Cookie 加 `Secure`（HTTPS 部署） |
-| `TASKBASE_LEASE_MS` | `60000` | 租约时长 |
-| `TASKBASE_SWEEP_MS` | `5000` | 任务回收扫描间隔 |
-| `TASKBASE_SCHEDULER_MS` | `5000` | 调度扫描间隔 |
-| `TASKBASE_SCHEDULE_GRACE_MS` | `300000` | 漏跑判定窗口 |
-| `TASKBASE_MAX_ARTIFACT_BYTES` | `5242880` | 单产物上限 |
+| `YUXUN_WEB_HOST` / `YUXUN_WEB_PORT` | `127.0.0.1` / `3334` | Web 端监听地址；兼容同名 `TASKBASE_*` |
+| `YUXUN_WEB_SESSION_TTL_MS` | `2592000000`（30 天） | Web 会话有效期 |
+| `YUXUN_PUBLIC_URL` / `TASKBASE_PUBLIC_URL` | 无 | HTTPS 公网入口；配置后默认启用 Secure Cookie |
+| `YUXUN_WEB_COOKIE_SECURE` | 无 | 设为 `1` 时 Cookie 加 `Secure`（HTTPS 部署） |
+| `YUXUN_LEASE_MS` | `60000` | 租约时长 |
+| `YUXUN_SWEEP_MS` | `5000` | 任务回收扫描间隔 |
+| `YUXUN_SCHEDULER_MS` | `5000` | 调度扫描间隔 |
+| `YUXUN_SCHEDULE_GRACE_MS` | `300000` | 漏跑判定窗口 |
+| `YUXUN_MAX_ARTIFACT_BYTES` | `5242880` | 单产物全局上限；与任务定义限额取小 |
 | `TRANSCRIPTION_PROVIDER` | `whisper` | `whisper` / `funasr` / `elevenlabs` |
 | `TRANSCRIPTION_MODEL` | Provider 默认 | FunASR/ElevenLabs 模型 |
 | `FUNASR_BASE_URL` / `FUNASR_API_TOKEN` | 本机 8000 | 自托管 FunASR |
@@ -253,19 +260,25 @@ yuxun transcribe 'https://example.com/audio.mp3' --no-wait
 | `TRANSCRIPTION_WHISPER_MODEL` | `small` | Whisper 模型（small/medium） |
 | `TRANSCRIPTION_WHISPER_DEVICE` | `cpu` | `cpu` 或 `mps` |
 | `TRANSCRIPTION_INITIAL_PROMPT` | 简体中文提示 | Whisper 初始提示 |
-| `TASKBASE_CONFIG_DIR` | `~/.config/taskbase` | CLI 会话目录 |
-| `TASKBASE_OWNER_USERNAME` | `owner` | 初始化用户名 |
-| `TASKBASE_OWNER_PASSWORD` | 无 | bootstrap 密码 |
+| `YUXUN_CONFIG_DIR` / `TASKBASE_CONFIG_DIR` | `~/.config/yuxun` | CLI 会话目录 |
+| `YUXUN_OWNER_USERNAME` / `TASKBASE_OWNER_USERNAME` | `owner` | 初始化及 Web 队列服务用户名 |
+| `YUXUN_OWNER_PASSWORD` / `TASKBASE_OWNER_PASSWORD` | 无 | bootstrap 和 Web 队列密码；Web 须设置同一密码 |
+| `YUXUN_TRANSCRIPT_API_TOKEN` / `TASKBASE_TRANSCRIPT_API_TOKEN` | 无 | Web 专用只读 Token |
 | `YUXUN_PASSWORD` / `TASKBASE_PASSWORD` | 无 | CLI 非交互登录密码 |
 | `YUXUN_WORKER_TOKEN` / `TASKBASE_WORKER_TOKEN` | 无 | Worker 凭据 |
-| `YUXUN_POLL_MS` / `YUXUN_HEARTBEAT_MS` | `2000` / `15000` | Worker 轮询/心跳 |
+| `YUXUN_POLL_MS` / `YUXUN_HEARTBEAT_MS` | `2000` / `15000` | Worker 轮询/心跳，正安全整数；Demo 轮询默认 1000；兼容同名 `TASKBASE_*` |
+
+任务和调度 input 必须是 JSON 对象，序列化后 UTF-8 不超过 64 KiB；新建、重试和调度执行均由 Store 校验。平台检查点和结果仍使用 8 MiB HTTP 请求上限。产物在读取正文前验证 App/Attempt，并同时检查声明长度和实际字节数；超限返回 413，不保留文件或索引。
+
+新增日志、进度、失败/关闭原因及应用诊断在输出或保存前脱敏，去除 HTTP(S) URL 用户信息、查询及片段，隐藏常见秘密字段和明确命名的环境秘密值（至少 4 字符）。业务输入、检查点、转写正文和历史数据不自动改写；这不替代完整秘密扫描或 TLS。修复证据见[审查规范](../spec/taskbase-current-spec.md)第 11.1 节。
 
 ## 播客规则
 
-- 有 RSS 时按 RSS 全量列表入库；没有 RSS 时回退公开页，通常只有 15 集，标 `partial`。
+- 有 RSS 时读取 Feed，再按日期范围入库，默认最近一年；没有 RSS 时回退公开页，通常只有 15 集，标 `partial`。已登记的 RSS 抓取失败会记失败，不自动回退页面。
+- RSS 的 `full` 是来源覆盖标记，不证明已保存所有历史，也不保证 Feed 本身包含全部历史。
 - 只入库列表元数据（标题、发布时间、时长、音频地址等），**不下载音频**。
 - `podcast_` 表与平台表在同一个 SQLite 文件；平台不读取播客表。
-- 每节目一个 schedule：Web 节目库 → 定时，底层是平台 `show/sync` 调度。
+- 建议每节目配置一个 schedule：Web 节目库 → 定时，底层是平台 `show/sync` 调度；接口不会阻止同节目重复创建。
 - RSS 地址在 Web 添加节目时登记后，Worker 会优先使用 RSS；当前已实测《忽左忽右》入库 203 集。
 
 ## 代码结构
@@ -318,28 +331,33 @@ scripts/
 ## 测试
 
 ```sh
-node --test test/*.test.ts
+npm run typecheck
+npm test
+npm run smoke:web # 需要本机 Chrome；可用 CHROME_PATH 指定可执行文件
 ```
 
-当前 **20 个测试全部通过**，覆盖任务闭环、恢复、超时、关闭/重试、cron/调度、播客/RSS 解析/入库/Worker、转写存储/Provider/安全下载/切片、Web 登录/代理/播客 API。
+测试覆盖任务闭环、恢复、超时、关闭/重试、cron/DST、播客/RSS 安全抓取、单集身份迁移、分页、转写入库补偿、取消与子进程清理、Web 会话/代理、在线备份与恢复演练。GitHub Actions 在 Node 24 下执行类型、语法、完整测试与 Chrome 页面检查。
 
-真实进程验证过：
+以下为历史验证记录，本轮复核结果与限制见[项目规范](../spec/taskbase-current-spec.md#9-测试策略与本轮记录)：
 
 - platform + Web + Podcast Worker + 本地节目页 fixture：采集任务成功，Web 单集入库
 - CLI + platform + Demo Worker：任务闭环与产物下载
-- Playwright 登录 Web 并截图
+- 隔离 Chrome 登录并检查主要页面、节目单集弹窗、转写历史、队列与任务翻页
 
 ## 数据与备份
 
 - 默认数据在 `.data/`：`taskbase.sqlite`、`artifacts/`。
-- 备份 = SQLite 数据库文件 + 产物目录；WAL 模式下建议停服务或使用 SQLite 在线备份。
+- 使用 `node scripts/backup.ts create .data <新备份目录>` 在线快照数据库并复制、校验产物；不要直接复制运行中的单个 SQLite 文件。
 - 平台表与 `podcast_` 表同库，备份一次即可。
-- Web Session 只在内存，不写入数据库；重启 Web Server 后重新登录。
+- Web Session 在数据库中；备份同样包含登录凭据，应限制访问并加密异机存储。
+- 校验、恢复演练、30 天任务日志与 7 天孤儿产物保留策略见 [运维文档](docs/operations.md)。
 
-## 下一步
+## 后续候选（不属于本轮交付要求）
+
+以下保留为后续评估方向，实施时另行确定；生产 HTTPS/备份恢复验收目前暂缓。
 
 1. RSS 自动发现：页面 `<link rel=rss>` / Apple Podcasts / Podcast Index。
 2. 在 RSS 入库后自动串联“单集 → 转写”任务。
-3. FunASR/MLX 或云端 Provider 替换 Whisper CLI。
-4. 平台 `app_state`、多产物/大二进制、多用户权限。
-5. Web Session 持久化与部署层反向代理/TLS。
+3. 增加 MLX Provider（已有 FunASR / ElevenLabs）。
+4. 评估平台 `app_state`、多产物/大二进制；多用户权限不属于原始范围，若需要须另行确认。
+5. 依实际域名完成部署层 HTTPS 切换（仓库已提供模板）。

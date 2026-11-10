@@ -1,6 +1,6 @@
 # Yuxun CLI 使用文档
 
-更新：2026-11-07
+更新：2026-11-10
 命令名：`yuxun`
 定位：管理远端 Taskbase，并控制 Mac 上的转写 Worker。
 
@@ -127,6 +127,8 @@ yuxun transcribe '<audio-url>' \
 
 批量转写的选择、排序和启停都在 Web 的「转写队列」完成；CLI 不负责挑选单集，只负责登录、查看、结束和单集提交。
 
+稿件库入库以 Web 队列/Runner 为准。CLI 单集任务成功后可读取平台结果或下载 Markdown，本轮不要求 CLI 自动决定或触发稿件库入库；要按 Web 稿件库流程管理内容，请从 Web 队列发起。
+
 ### 查看转写队列
 
 ```sh
@@ -170,7 +172,7 @@ yuxun stop <task-id>
 yuxun stop <task-id> --reason '内容选错了'
 ```
 
-等价于 `yuxun task close <task-id>`。任务会标记为 `closed`；Worker 在下一次心跳或当前切片结束时停止。
+等价于 `yuxun task close <task-id>`。任务会标记为 `closed`；Worker 在下一次心跳确认租约失效后中止下载、ASR 与 ffmpeg 子进程。
 
 ### 停止/启动 Worker
 
@@ -351,6 +353,8 @@ Token 一旦轮换，需要重新执行 `yuxun worker pair`。
 
 ### 当前环境变量
 
+对应别名统一遵循 `显式参数 > YUXUN_* > TASKBASE_* > 默认值`。新别名已设置为空时不回退旧值；Worker 心跳和轮询必须是正安全整数，数值空串采用默认值。旧会话文件只在迁移兼容路径读取。
+
 | 变量 | 说明 |
 | --- | --- |
 | `YUXUN_URL` | 远端 Platform 地址 |
@@ -360,6 +364,10 @@ Token 一旦轮换，需要重新执行 `yuxun worker pair`。
 | `YUXUN_DATA_DIR` | Worker 临时数据目录；转写结果不落本地 |
 | `YUXUN_POLL_MS` | Worker 轮询间隔 |
 | `YUXUN_HEARTBEAT_MS` | Worker 心跳间隔 |
+
+Mac Agent 路径/Node 还支持 `YUXUN_MAC_AGENT_DIR`、`YUXUN_LEGACY_AGENT_DIR`、`YUXUN_LAUNCH_AGENTS_DIR`、`YUXUN_MAC_AGENT_LOG`、`YUXUN_NODE_BIN`，均兼容对应 `TASKBASE_*`；`worker pair --server/--token/--data-dir` 优先于环境变量。
+
+任务和调度 input 只接受 JSON 对象；文件、stdin、内联 JSON 均检查 64 KiB 原始输入上限，解析后的 UTF-8 序列化大小也不超过 64 KiB。平台服务端执行相同对象/序列化限额，不能通过 API 绕过。结果与检查点不套用输入上限。
 
 转写变量：
 

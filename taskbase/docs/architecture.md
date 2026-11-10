@@ -2,16 +2,17 @@
 
 本文描述当前 `taskbase/` 独立工程的实现架构、Web 端、任务生命周期和调度流程。图分为可编辑的 Mermaid 源码和渲染后的 PNG（`docs/diagrams/`）。
 
-> 说明：这里的“播客任务后台”是前文播客采集链路的 Web 端；不下载音频，只入库节目/单集列表元数据。
+更新：2026-11-10。当前契约、证据和范围决定见[项目规范与验收审查](../../spec/taskbase-current-spec.md)。维护者已确认按现有功能交付，沿用当前 grace/Attempt 规则，稿件入库以 Web 队列为准，生产运维验收暂缓。采集仅保存节目/单集元数据；下载音频由独立转写 Worker 完成。
 
 ## 1. 系统边界
 
 Taskbase 是一个**单用户、单服务器**的任务平台：
 
 - 平台负责任务控制面：认证、应用/任务定义、队列、租约、事件/日志、产物元数据、cron 调度。
-- 播客应用负责领域数据：`podcast_shows` / `podcast_episodes` / `podcast_ingest_runs`，由应用自己迁移；平台不读取这些表。
-- Web 端包含**平台管理后台**和**播客任务后台**，浏览器只持有 Web 会话 Cookie，不接触平台 Owner Token 或 Worker Token。
+- 播客应用负责领域数据：`podcast_shows` / `podcast_episodes` / `podcast_ingest_runs` 与单集别名，由应用自己迁移；平台不读取这些表。平台任务摘要目前有 `podcast-tools` 专用分支，仍存在领域耦合。
+- Web 端包含**平台管理后台**和**播客任务后台**，日常请求使用 Web 会话 Cookie，不持有平台 Owner Token。注册/轮换操作会一次性展示 Worker Token，供所有者配对。
 - Podcast Worker 负责抓公开节目页并写入列表；当前不下载音频、不转录。
+- 转写 Runner 随 Web 服务常驻，管理顺序、平台任务关联与稿件入库补偿；远端转写 Worker 负责下载/ASR/结果回传。
 - 所有状态保存在同一个 SQLite 文件，产物保存在本地目录。
 
 ## 2. 架构图
@@ -21,9 +22,8 @@ Taskbase 是一个**单用户、单服务器**的任务平台：
 - [系统架构 PNG](diagrams/architecture.png)
 - [任务执行流程 PNG](diagrams/task-flow.png)
 - [调度触发流程 PNG](diagrams/schedule-flow.png)
-- [Web 总览](screenshots/overview.png)
-- [播客节目库](screenshots/podcast-shows.png)
-- [调度页](screenshots/schedules.png)
+
+PNG 为历史渲染资产，本轮未重新生成；当前结构和执行语义以文字、Mermaid 与项目规范为准。页面截图未纳入 Git。
 
 Mermaid 源码：
 
@@ -36,6 +36,7 @@ flowchart TB
 
     subgraph SERVER[远程单服务器]
         WEBS[Web Server\nnode:http\n会话 Cookie / 平台代理 / 播客 API]
+        RUNNER[TranscriptionRunner\n队列提交 / 对账 / 稿件入库]
         API[Platform API\nnode:http]
         AUTH[认证与 Token]
         DEF[应用 / 任务定义]
@@ -45,14 +46,17 @@ flowchart TB
         SDK[Worker SDK]
         W1[Demo Worker]
         W2[Podcast Worker]
-        DB[(SQLite WAL\n平台表 + podcast_ 前缀表)]
+        DB[(SQLite WAL\n平台 / podcast_ / 转写 / 会话)]
         FILES[(本地产物目录)]
     end
 
     CLI -->|HTTPS/JSON| API
     WEB -->|HTTPS/JSON| WEBS
     WEBS -->|内部 HTTP| API
-    WEBS -->|podcast_ 表| DB
+    WEBS --> DB
+    WEBS --> RUNNER
+    RUNNER -->|任务提交 / 结果 / 关闭| API
+    RUNNER --> DB
     API --> AUTH
     API --> DEF
     API --> TASK
@@ -68,6 +72,8 @@ flowchart TB
     W2 -->|podcast_ 表| DB
     W1 --> SDK
     W2 --> SDK
+    W3[远端转写 Worker] -->|领取 / 心跳 / 结果 / 产物| API
+    W3 --> ASR[音频源 / ffmpeg / ASR Provider]
 ```
 
 ## 3. 组件职责
@@ -86,6 +92,7 @@ flowchart TB
 | RSS Parser | `src/podcast/rss.ts` | RSS 2.0 / Atom 解析、时间/时长/音频元数据 |
 | Podcast Worker | `src/podcast/worker.ts` | RSS 优先、页面回退、日期过滤、partial 标记 |
 | Transcription Store | `src/transcription/store.ts` | `transcription_transcripts` 文字稿表 |
+| Transcription Queue / Runner | `src/transcription/queue.ts`、`runner.ts` | 持久化队列、幂等提交、对账、取消与入库补偿 |
 | Whisper Provider | `src/transcription/asr.ts` | 本地 `whisper` CLI 转写、segments 解析 |
 | Transcription Worker | `src/transcription/worker.ts` | 下载/ffmpeg/ASR/Markdown/产物上传 |
 | Worker SDK | `src/worker-sdk.ts` | 领取、心跳、进度、日志、步骤、产物、完成/失败 |
@@ -108,24 +115,32 @@ flowchart TB
 
 - Platform API 默认 `127.0.0.1:3333`；Web 端默认 `127.0.0.1:3334`。
 - Web 端与 Platform API 是**两个独立进程**；Web 端通过内部 HTTP 调平台，不直接写平台任务表。
-- Web 端和 Worker 直接打开同一个 SQLite 文件访问 `podcast_` 表；WAL 允许并发读写。
-- 反向代理/TLS 由部署层负责；当前 Web Cookie 默认不带 `Secure`，HTTPS 部署时设置 `TASKBASE_WEB_COOKIE_SECURE=1`。
+- Web 端和 Podcast Worker 直接打开同一个 SQLite 文件访问领域表；它们须与 API 使用同一数据目录。WAL 允许同机多连接，但不代表多个 Web Runner 可以安全并行推进。
+- 转写 Worker 可位于 Mac，通过 HTTP 上传结果与产物，不直接访问服务端数据库。Web 进程停机时队列不再继续提交，已提交的平台任务可继续执行。
+- 反向代理/TLS 由部署层负责；配置 `YUXUN_PUBLIC_URL=https://域名` 后 Web Cookie 默认带 `Secure`，也可显式设置 `TASKBASE_WEB_COOKIE_SECURE=1`。切换步骤见 [HTTPS](https.md)。
 
 ## 5. Web 端
 
-Web 端有两组导航：
+Web 页面按以下职责组织：
 
-- **平台管理**：总览、任务、应用、调度。
-- **播客任务**：节目库、采集任务。
+- 总览、应用、调度与平台任务。
+- 内容库：订阅列表、候选节目；单集库：单集、转写列表。
+- 任务：转写队列与采集任务；转写稿提供独立阅读页。
 
 关键设计：
 
-- 登录使用平台用户名/密码；Web Server 调平台登录接口，拿到 Owner Token 后只保存在服务端内存 Session。
-- 浏览器只拿到 `tb_session` HttpOnly Cookie 和 CSRF Token；Owner Token / Worker Token 不进浏览器。
+- 登录使用平台用户名/密码；Web Server 调平台登录接口，拿到 Owner Token 后保存在服务端 SQLite Session，浏览器只持有会话 ID。
+- 浏览器日常使用 `tb_session` HttpOnly Cookie 和 CSRF Token；Owner Token 不进浏览器。一次性 Worker Token 会在注册/轮换时展示，不应持久化到浏览器存储。
 - Web Server 的 `/api/platform/*` 是**带会话鉴权的平台 API 代理**；非 GET 请求必须带 `X-CSRF-Token`。
 - 播客领域 API 由 Web Server 直接读 `podcast_` 表；提交采集/同步任务时再调平台任务 API。
-- Session 默认 12 小时，进程重启即失效，需要重新登录；这是单用户本地工具的简化选择。
+- Session 默认 30 天，Web 重启后继续有效；退出会删除数据库中的会话。
+- 队列自动推进另需 Web 服务端有效的 `YUXUN_OWNER_USERNAME` / `YUXUN_OWNER_PASSWORD`（兼容 `TASKBASE_OWNER_*`），不能仅依赖浏览器会话。对应别名统一遵循 `显式参数 > YUXUN_* > TASKBASE_* > 默认值`。
+- 列表在 SQL 中筛选分页，任务/转写列表读取摘要；详情单独读取全文。
 - Web 端没有独立框架/构建步骤；静态资源由 `web/server.ts` 白名单提供，CSP 禁止内联脚本。
+
+平台 Store 统一校验任务/调度 input 为 JSON 对象且序列化 UTF-8 不超过 64 KiB，重试和触发也重新检查。HTTP 产物上传先验证 App/Attempt，再按全局和当前定义上限的较小值读取，Store 在写入时再次检查定义；结果和检查点保留 8 MiB HTTP 空间。
+
+`src/redact.ts` 在 SDK 上报、Store/应用错误持久化、API/Web 错误响应及 Worker 控制台边界脱敏诊断文字，先脱敏再截断。不改写任务输入、ASR 正文和检查点，也不自动清理历史含秘密数据；具体规则与边界见[当前规范](../../spec/taskbase-current-spec.md#66-接口分页与产物)。
 
 主要 Web API：
 
@@ -148,6 +163,14 @@ POST /api/podcast/register
 GET  /api/podcast/episodes/:id/transcript
 POST /api/podcast/episodes/:id/transcribe
 POST /api/transcription/register
+GET  /api/podcast/episodes
+GET  /api/transcription/queue
+POST /api/transcription/queue
+POST /api/transcription/queue/start
+POST /api/transcription/queue/pause
+GET  /api/transcription/transcripts
+GET  /api/v1/queue                 # Bearer，只读
+GET  /api/v1/transcripts           # Bearer，只读
 ```
 
 ## 6. 任务生命周期
@@ -176,6 +199,7 @@ stateDiagram-v2
 - **尝试隔离**：只有当前 `attempt_id` 可以写入；旧 Attempt 返回 409 `STALE_ATTEMPT`。
 - **幂等**：相同用户 + App + 任务 + 幂等键 + 输入返回原任务；输入不同返回 409。
 - **超时**：排队超时 / 执行超时均进入 `closed`，原因 `QUEUE_TIMEOUT` / `TIMEOUT`。
+- **预算**：恢复后重新领取会重算执行 deadline；6 小时是单次 Attempt 的配置上限，不是整个任务总耗时上限。恢复排队同样重新计算截止时间。
 - **关闭**：人工关闭立即置 `closed`，清租约并拒绝后续写入；不做 Worker 取消握手。
 - **重试**：不修改原任务，创建新任务并记录 `retry_of_task_id`。
 
@@ -217,25 +241,28 @@ sequenceDiagram
 ```text
 Web 添加栏目（页面 URL + 可选 RSS URL）
   → Podcast Worker 领取 collect/sync 任务
-  → 有 rss_url：fetchFeed → parseFeedXml → 一年过滤 → upsert source=rss（coverage=full）
-  → 无 rss_url：抓公开页 → 解析 15 集 → upsert source=page（coverage=partial）
+  → 有 rss_url：fetchFeed → parseFeedXml → 日期过滤（默认最近一年）→ upsert source=rss（coverage=full）
+  → 无 rss_url：抓公开页 → 解析页面提供的列表（通常15集）→ 日期过滤 → upsert source=page
   → 写 podcast_ingest_runs
   → Web 展示已入库集数、RSS 总集数、覆盖状态
 ```
 
-RSS 来源优先级：用户填写的 RSS → 页面 `<link rel="alternate" type="application/rss+xml">` → Apple Podcasts lookup → Podcast Index（可选）。当前已用 Apple Podcasts 搜索找到 9 个中文栏目 feed，并实测《忽左忽右》入库 203 集；详见 [RSS 来源与首批栏目](rss-sources.md)。
+当前只使用已登记 RSS，不自动发现页面 `<link>`、Apple Podcasts 或 Podcast Index。没有 RSS 才走公开页；已登记 RSS 抓取失败会记失败，不自动回退。RSS 的 `full` 仅是来源覆盖标记，仍经过日期过滤，且 Feed 本身可能不含全部历史。[RSS 来源与首批栏目](rss-sources.md)中的 Apple 搜索和入库集数是历史调研记录。
 
 ## 9. 转写流程
 
 ### 一次播客转写任务的完整流程
 
-![一次播客转写任务完整流程](diagrams/transcription-flow.png)
+![一次播客转写任务完整流程（历史渲染图）](diagrams/transcription-flow.png)
+
+下方 Mermaid 已包含当前队列提交与入库步骤，PNG 本轮未重新生成。
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor U as 用户 / Web UI
     participant W as Web Server
+    participant R as TranscriptionRunner
     participant P as Platform API
     participant Q as SQLite / Queue
     participant K as Mac Worker
@@ -243,10 +270,13 @@ sequenceDiagram
 
     U->>W: 点击单集「转写」
     W->>Q: 读取单集 audio_url / title / episode_id
-    W->>P: POST /v1/tasks（transcription-tools/episode/transcribe）
+    W->>Q: 保存队列项、启用队列
+    W-->>U: 已加入队列
+    R->>Q: 保存幂等键与固定提交输入
+    R->>P: POST /v1/tasks + Idempotency-Key
     P->>Q: schema 校验 + 写 queued task + event
-    P-->>W: 202 task
-    W-->>U: 任务已排队
+    P-->>R: 202 task（重复提交返回原任务）
+    R->>Q: 保存平台 task_id
 
     K->>P: POST /v1/worker/leases
     P->>Q: lease + attempt
@@ -267,6 +297,8 @@ sequenceDiagram
     P->>Q: 保存 artifact 元数据
     K->>P: complete(output)
     P->>Q: 校验 output schema，标记 succeeded + event
+    R->>P: 对账状态并获取完整 result
+    R->>Q: 保存转写稿后标记队列 done
 
     U->>W: 打开 /#/transcript/:episode
     W->>Q: 服务端 transcription_transcripts 或 task output fallback
@@ -296,8 +328,13 @@ Web 转写队列 → “开始”
 - 默认 `whisper` CLI + `small` 模型；可用 `TRANSCRIPTION_WHISPER_MODEL` 改 `medium`。
 - 产物是 Markdown；Worker 不写本地数据库，临时音频和中间文件用完即删。
 - 服务端是唯一数据源：任务队列、转写稿、产物都以服务端为准。
-- 远端 Web 与 Worker 不在同一台机器时，Web 从服务端任务输出恢复文字稿（包含 `text`/`segments`/`artifact_id`）。
+- 稿件入库以 Web 队列为准，由 Runner 从平台结果保存稿件后确认完成；CLI 与兼容直提保持任务提交/结果读取能力，本轮不要求成功后自动入库。单集阅读可在最近 100 个转写任务中回退读取结果；只读转写 API 仅查询已入库稿件。
 - 临时音频默认删除；音频下载上限 500 MiB；执行超时 6 小时。
+- 切片恢复复用 ASR 检查点，仍会重新下载、转码和切片；恢复期间不要变更音频内容、切片参数或模型。
+- Web 队列通过独立 `TranscriptionRunner` 串行推进，提交前保存幂等键；响应丢失后用同键找回平台任务，稿件入库成功后才标记完成。
+- 取消与队列推进串行；平台确认关闭后才标记取消。Worker 在心跳失效或退出时中止下载、ASR 和 ffmpeg 进程组。
+- 单集 ID 与采集来源解耦；公开页与 RSS 的相同身份/音频记录合并，旧 ID 保留为别名，转写与在途任务继续关联。
+- 兼容接口 `POST /api/podcast/episodes/:id/transcribe` 仍直接创建平台任务；上图描述当前页面正常走队列的路径。
 
 ## 10. 调度流程
 
@@ -307,6 +344,7 @@ Web 转写队列 → “开始”
 sequenceDiagram
     participant S as 调度器
     participant D as SQLite
+    participant A as Platform API
     participant W as Worker
 
     loop 每 5 秒（TASKBASE_SCHEDULER_MS）
@@ -320,7 +358,9 @@ sequenceDiagram
             S->>D: 记录 created，推进 next_fire
         end
     end
-    W->>D: 领取任务并执行
+    W->>A: 领取任务
+    A->>D: 创建 Attempt / 租约
+    A-->>W: 返回输入和检查点
 ```
 
 调度语义：
@@ -376,6 +416,15 @@ failed / closed
 | `podcast_shows` | 节目 URL、标题、RSS、覆盖状态、最近同步 |
 | `podcast_episodes` | 单集列表元数据（标题、发布时间、时长、音频地址等，不下载音频） |
 | `podcast_ingest_runs` | 每次采集的区间、状态、新增/更新数量、错误 |
+| `podcast_episode_aliases` / `podcast_migrations` | 规范单集身份、旧 ID 别名与迁移记录 |
+
+Web 与转写表：
+
+| 表 | 用途 |
+| --- | --- |
+| `web_sessions` | 会话、CSRF 与可用 Owner Token；数据库和备份须按含凭据数据保护 |
+| `transcription_transcripts` | 已入库正文、时间段与产物关联 |
+| `transcription_queue` / `transcription_queue_state` | 队列顺序、任务关联、提交/入库阶段及启停状态 |
 
 ## 13. API 能力
 
@@ -433,6 +482,6 @@ POST /v1/worker/tasks/:id/fail
 
 - RSS 自动发现 UI（当前已能手工填 RSS；Apple 搜索已用于离线调研）。
 - 拉取入库后自动串联“单集 → 转写”；文章→Markdown。
-- 平台 `app_state`、多产物/二进制大文件、多用户权限。
-- Web Session 持久化与更细的权限（当前单用户，内存 Session）。
+- 平台 `app_state`、多产物/二进制大文件。多用户权限不属于原始范围，若需要须另行确认。
+- 更细的权限（当前单用户；Session 已持久化）。
 - 博客/文章发布（如果“博客”不是“播客”的笔误，需要另做领域层）。
