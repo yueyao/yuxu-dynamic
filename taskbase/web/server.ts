@@ -15,6 +15,7 @@ import { TranscriptionStore } from '../src/transcription/store.ts';
 import { TranscriptionQueueStore } from '../src/transcription/queue.ts';
 import { TranscriptionRunner, type PlatformRequest } from '../src/transcription/runner.ts';
 import { renderTranscriptMarkdown } from '../src/transcription/markdown.ts';
+import { transcriptVersion, validateTranscript, type TranscriptVersion } from '../src/transcription/contract.ts';
 import { diagnosticMessage } from '../src/redact.ts';
 import { envValue } from '../src/env.ts';
 
@@ -123,6 +124,7 @@ function getPathSuffix(path: string, prefix: string): string | null {
 
 function transcriptMarkdown(transcript: ReturnType<TranscriptionStore['list']>[number]): string {
   return renderTranscriptMarkdown({
+    version: transcript.version, diarization: transcript.diarization,
     title: transcript.title,
     language: transcript.language,
     provider: transcript.provider,
@@ -131,6 +133,13 @@ function transcriptMarkdown(transcript: ReturnType<TranscriptionStore['list']>[n
     text: transcript.text,
     segments: transcript.segments,
   });
+}
+
+function versionQuery(url: URL): TranscriptVersion | undefined {
+  const value = url.searchParams.get('version');
+  if (value === null) return undefined;
+  if (value !== '1' && value !== '2') throw new WebError(400, 'INVALID_VERSION', 'version 必须是 1 或 2');
+  return Number(value) as TranscriptVersion;
 }
 
 function sendMarkdown(response: ServerResponse, filename: string, markdown: string): void {
@@ -279,6 +288,7 @@ export function createWebServer(options: WebServerOptions): Server {
         offset: Number.isFinite(rawOffset) ? rawOffset : 0,
         showId: url.searchParams.get('show_id') ?? undefined,
         episodeId: url.searchParams.get('episode_id') ?? undefined,
+        version: versionQuery(url),
         query: url.searchParams.get('q')?.trim() || undefined,
       });
       return sendJson(response, 200, {
@@ -582,7 +592,7 @@ export function createWebServer(options: WebServerOptions): Server {
       const force = body.force === true;
       const alreadyDone = force
         ? []
-        : episodes.filter((episode) => transcriptionStore.getByEpisode(episode.episode_id) !== null);
+        : episodes.filter((episode) => transcriptionStore.getByEpisode(episode.episode_id, 2) !== null);
       const alreadyDoneIds = new Set(alreadyDone.map((episode) => episode.episode_id));
       const queueable = episodes.filter((episode) => !alreadyDoneIds.has(episode.episode_id));
       const result = transcriptionQueue.add(queueable.map((episode) => ({
@@ -591,6 +601,7 @@ export function createWebServer(options: WebServerOptions): Server {
         title: episode.title,
         audio_url: episode.audio_url ?? '',
         force,
+        regenerate: true,
       })));
       return sendJson(response, 200, {
         ...result,
@@ -627,6 +638,7 @@ export function createWebServer(options: WebServerOptions): Server {
         limit: Number.isFinite(limit) ? limit : 20,
         offset: Number.isFinite(offset) ? offset : 0,
         query,
+        version: versionQuery(new URL(request.url ?? '/', 'http://localhost')),
       });
       return sendJson(response, 200, {
         total,
@@ -693,6 +705,13 @@ export function createWebServer(options: WebServerOptions): Server {
     }
 
     const transcriptMarkdownMatch = path.match(/^\/api\/transcription\/transcripts\/([^/]+)\/markdown$/);
+    const transcriptDetailMatch = path.match(/^\/api\/transcription\/transcripts\/([^/]+)$/);
+    if (method === 'GET' && transcriptDetailMatch) {
+      const transcript = transcriptionStore.getById(decodeURIComponent(transcriptDetailMatch[1]));
+      if (!transcript) throw new WebError(404, 'TRANSCRIPT_NOT_FOUND', '转写稿不存在');
+      return sendJson(response, 200, { transcript, available_versions: transcript.episode_id
+        ? transcriptionStore.availableVersions(transcript.episode_id) : [transcript.version] });
+    }
     if (method === 'GET' && transcriptMarkdownMatch) {
       const transcript = transcriptionStore.getById(decodeURIComponent(transcriptMarkdownMatch[1]));
       if (!transcript) throw new WebError(404, 'TRANSCRIPT_NOT_FOUND', '转写稿不存在');
@@ -820,12 +839,12 @@ export function createWebServer(options: WebServerOptions): Server {
         limit: Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 100) : 50,
         offset: Number.isFinite(offset) ? Math.max(Math.trunc(offset), 0) : 0,
         episodes: result.episodes.map((episode) => {
-          const { transcript_id, transcript_created_at, ...rest } = episode;
+          const { transcript_id, transcript_created_at, transcript_version, ...rest } = episode;
           return {
             ...rest,
             collected: true,
             transcript: transcript_id
-              ? { transcript_id, created_at: transcript_created_at }
+              ? { transcript_id, created_at: transcript_created_at, version: transcript_version }
               : null,
           };
         }),
@@ -857,6 +876,13 @@ export function createWebServer(options: WebServerOptions): Server {
       });
     }
 
+    const episodeDetail = path.match(/^\/api\/podcast\/episodes\/([^/]+)$/);
+    if (episodeDetail && method === 'GET') {
+      const episode = store.getEpisode(decodeURIComponent(episodeDetail[1]));
+      if (!episode) throw new WebError(404, 'EPISODE_NOT_FOUND', '单集不存在');
+      return sendJson(response, 200, { episode });
+    }
+
     const episodeTranscribe = path.match(/^\/api\/podcast\/episodes\/([^/]+)\/transcribe$/);
     if (episodeTranscribe && method === 'POST') {
       const episode = store.getEpisode(decodeURIComponent(episodeTranscribe[1]));
@@ -871,27 +897,44 @@ export function createWebServer(options: WebServerOptions): Server {
           show_id: episode.show_id,
           title: episode.title,
           language,
+          version: 2,
         }, '转写应用'));
     }
 
     const episodeTranscript = path.match(/^\/api\/podcast\/episodes\/([^/]+)\/transcript$/);
     if (episodeTranscript && method === 'GET') {
       const episodeId = store.resolveEpisodeId(decodeURIComponent(episodeTranscript[1]));
-      const local = transcriptionStore.getByEpisode(episodeId);
-      if (local) return sendJson(response, 200, { transcript: local });
+      const version = versionQuery(url);
+      const local = transcriptionStore.getByEpisode(episodeId, version);
+      const available = transcriptionStore.availableVersions(episodeId);
+      if (local || available.length) return sendJson(response, 200, { transcript: local, available_versions: available });
 
       // 远端 Worker 可能不在 Web/平台同一台机器：从平台任务输出恢复
       const tasks = await platformJson<{ tasks: Array<Record<string, any>> }>(
         '/v1/tasks?app_id=transcription-tools&limit=100', { token: session.token });
-      const task = tasks.tasks.find((entry) => entry.status === 'succeeded'
-        && entry.input && entry.input.episode_id === episodeId);
-      if (!task) return sendJson(response, 200, { transcript: null });
-      const result = await platformJson<{ output?: Record<string, any> }>(
-        `/v1/tasks/${encodeURIComponent(task.task_id)}/result`, { token: session.token });
-      const output = result.output ?? {};
+      const candidates = tasks.tasks.filter((entry) => entry.status === 'succeeded'
+        && entry.input && typeof entry.input.episode_id === 'string' && store.resolveEpisodeId(entry.input.episode_id) === episodeId);
+      const results = [];
+      for (const entry of candidates) {
+        const result = await platformJson<{ output?: Record<string, any> }>(
+          `/v1/tasks/${encodeURIComponent(entry.task_id)}/result`, { token: session.token });
+        const output = result.output ?? {};
+        try {
+          const actual = transcriptVersion(output.version);
+          validateTranscript({ version: actual, text: output.text, segments: output.segments, diarization: output.diarization });
+          results.push({ task: entry, output, version: actual });
+        } catch { /* 无效结果不得作为 v2 稿件回退展示。 */ }
+      }
+      const versions = [...new Set(results.map((item) => item.version))].sort();
+      const selected = results.filter((item) => version === undefined || item.version === version)
+        .sort((a, b) => b.version - a.version || String(b.task.updated_at).localeCompare(String(a.task.updated_at)))[0];
+      if (!selected) return sendJson(response, 200, { transcript: null, available_versions: versions });
+      const { task, output, version: actual } = selected;
       const segments = Array.isArray(output.segments) ? output.segments : [];
       return sendJson(response, 200, {
+        available_versions: versions,
         transcript: {
+          version: actual, diarization: output.diarization ?? null,
           transcript_id: output.transcript_id ?? null,
           task_id: task.task_id,
           episode_id: episodeId,

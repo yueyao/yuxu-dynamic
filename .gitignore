@@ -6,3 +6,4 @@ dist/
 taskbase/.data/
 taskbase/.deploy/
 taskbase/docs/screenshots/
+__pycache__/

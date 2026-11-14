@@ -318,7 +318,8 @@ sequenceDiagram
 Web 转写队列 → “开始”
   → 服务端按顺序创建 transcription-tools/episode/transcribe
   → Transcription Worker 领取
-  → 下载音频 → ffmpeg 16k mono → Whisper CLI → segments
+  → 下载音频 → ffmpeg 16k mono → pyannote整集说话者分析
+  → Whisper CLI按600秒分块 + 词时间戳 → 整集时间对齐/说话者标签
   → 生成 transcript.md → 上传平台产物
   → complete
   → Web 写入服务端 transcription_transcripts
@@ -326,11 +327,12 @@ Web 转写队列 → “开始”
 ```
 
 - 默认 `whisper` CLI + `small` 模型；可用 `TRANSCRIPTION_WHISPER_MODEL` 改 `medium`。
+- 新任务v2在本机顺序运行community-1和Whisper；旧稿v1保留。版本存储、独立Python安装及真实模型验收边界见[转写v2](transcription-v2.md)。
 - 产物是 Markdown；Worker 不写本地数据库，临时音频和中间文件用完即删。
 - 服务端是唯一数据源：任务队列、转写稿、产物都以服务端为准。
 - 稿件入库以 Web 队列为准，由 Runner 从平台结果保存稿件后确认完成；CLI 与兼容直提保持任务提交/结果读取能力，本轮不要求成功后自动入库。单集阅读可在最近 100 个转写任务中回退读取结果；只读转写 API 仅查询已入库稿件。
 - 临时音频默认删除；音频下载上限 500 MiB；执行超时 6 小时。
-- 切片恢复复用 ASR 检查点，仍会重新下载、转码和切片；恢复期间不要变更音频内容、切片参数或模型。
+- 恢复仍会重新下载/转码；v2检查点以音源SHA、模型配置/revision、语言、词时间和切片参数隔离，配置变化不会误用旧数据。
 - Web 队列通过独立 `TranscriptionRunner` 串行推进，提交前保存幂等键；响应丢失后用同键找回平台任务，稿件入库成功后才标记完成。
 - 取消与队列推进串行；平台确认关闭后才标记取消。Worker 在心跳失效或退出时中止下载、ASR 和 ffmpeg 进程组。
 - 单集 ID 与采集来源解耦；公开页与 RSS 的相同身份/音频记录合并，旧 ID 保留为别名，转写与在途任务继续关联。

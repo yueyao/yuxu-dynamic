@@ -1,0 +1,2 @@
+# 独立虚拟环境安装，避免改变现有 Whisper。pyannote 直接版本固定；完整环境由 pip freeze 记录。
+pyannote.audio==4.0.7

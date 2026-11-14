@@ -19,6 +19,7 @@ export const transcriptionManifest = {
           show_id: { type: 'string', minLength: 1, maxLength: 200 },
           title: { type: 'string', minLength: 1, maxLength: 500 },
           language: { type: 'string', minLength: 2, maxLength: 20 },
+          version: { type: 'integer', enum: [2] },
         },
       },
       output_schema: {
@@ -34,6 +35,12 @@ export const transcriptionManifest = {
           text: { type: 'string' },
           provider: { type: 'string' },
           model: { type: 'string' },
+          version: { type: 'integer', enum: [1, 2] },
+          diarization: { type: 'object', additionalProperties: false, required: ['provider', 'model'], properties: {
+            provider: { type: 'string', enum: ['pyannote'] }, model: { type: 'string', minLength: 1 },
+            revision: { type: 'string' }, device: { type: 'string' },
+            packages: { type: 'object', additionalProperties: true },
+          } },
         },
       },
       queue_timeout_ms: 3_600_000,

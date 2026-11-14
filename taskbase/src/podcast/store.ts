@@ -36,6 +36,7 @@ export type EpisodeLibraryItem = PodcastEpisode & {
   collected_at: string;
   transcript_id: string | null;
   transcript_created_at: string | null;
+  transcript_version: number | null;
 };
 
 export type PodcastEpisode = {
@@ -599,13 +600,18 @@ export class PodcastStore {
         : `e.published_at IS NULL, e.published_at ${direction}, e.id ${direction}`;
     const limit = Number.isSafeInteger(options.limit) ? Math.min(Math.max(options.limit ?? 50, 1), 100) : 50;
     const offset = Number.isSafeInteger(options.offset) ? Math.max(options.offset ?? 0, 0) : 0;
+    const versioned = hasTranscripts && (this.db.prepare('PRAGMA table_info(transcription_transcripts)').all() as Array<{ name: string }>)
+      .some((column) => column.name === 'version');
+    const transcriptOrder = `${versioned ? 't.version DESC, ' : ''}t.created_at DESC, t.id DESC`;
     const transcriptColumns = hasTranscripts
-      ? `(SELECT t.id FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY t.created_at DESC LIMIT 1) AS transcript_id,
-         (SELECT t.created_at FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY t.created_at DESC LIMIT 1) AS transcript_created_at`
-      : 'NULL AS transcript_id, NULL AS transcript_created_at';
+      ? `(SELECT t.id FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY ${transcriptOrder} LIMIT 1) AS transcript_id,
+         (SELECT t.created_at FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY ${transcriptOrder} LIMIT 1) AS transcript_created_at,
+         ${versioned ? `(SELECT t.version FROM transcription_transcripts t WHERE t.episode_id = e.id ORDER BY ${transcriptOrder} LIMIT 1)`
+          : '(SELECT 1 FROM transcription_transcripts t WHERE t.episode_id = e.id LIMIT 1)'} AS transcript_version`
+      : 'NULL AS transcript_id, NULL AS transcript_created_at, NULL AS transcript_version';
     const rows = this.db.prepare(`SELECT e.*, s.title AS show_title, ${transcriptColumns}
       ${from} ${whereSql} ORDER BY ${orderBy} LIMIT ? OFFSET ?`).all(...args, limit, offset) as
-      Array<EpisodeRow & { show_title: string; transcript_id: string | null; transcript_created_at: number | null }>;
+      Array<EpisodeRow & { show_title: string; transcript_id: string | null; transcript_created_at: number | null; transcript_version: number | null }>;
     return {
       episodes: rows.map((row) => ({
         episode_id: row.id,
@@ -622,6 +628,7 @@ export class PodcastStore {
         collected_at: new Date(row.created_at).toISOString(),
         transcript_id: row.transcript_id,
         transcript_created_at: iso(row.transcript_created_at),
+        transcript_version: row.transcript_version,
       })),
       total: totalRow.count,
       summary: { total: summaryTotal, transcribed: summaryTranscribed },

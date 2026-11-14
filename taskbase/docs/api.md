@@ -4,6 +4,8 @@
 Base URL：`http://43.156.253.152`
 定位：只读查询已入库的转写稿，供外部脚本或其他系统集成。
 
+稿件新增`version:1|2`、`diarization`和片段`speaker_id`；历史为v1，新任务为v2。列表可传`version=1|2`筛选，非法值返回400；API路径`/api/v1`不表示稿件版本。下载按transcript_id固定版本。详见[转写v2](transcription-v2.md)。
+
 ## 认证
 
 使用 Bearer Token：

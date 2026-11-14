@@ -137,7 +137,7 @@ export class TranscriptionQueueStore {
     return row ? toItem(row) : null;
   }
 
-  add(items: Array<{ episode_id: string; show_id: string; title: string; audio_url: string; force?: boolean }>): {
+  add(items: Array<{ episode_id: string; show_id: string; title: string; audio_url: string; force?: boolean; regenerate?: boolean }>): {
     added: number; skipped: number;
   } {
     const now = Date.now();
@@ -155,11 +155,12 @@ export class TranscriptionQueueStore {
         if (!item.episode_id || !item.audio_url) { skipped += 1; continue; }
         const existing = exists.get(item.episode_id) as { status: QueueStatus } | undefined;
         if (existing) {
-          if (item.force && ['done', 'failed', 'canceled'].includes(existing.status)) {
-            this.db.prepare(`UPDATE transcription_queue SET status = 'pending', enabled = 1, force = 1,
+          if ((item.force || item.regenerate) && ['done', 'failed', 'canceled'].includes(existing.status)) {
+            this.db.prepare(`UPDATE transcription_queue SET status = 'pending', enabled = 1, force = ?,
+              show_id = ?, title = ?, audio_url = ?,
               task_id = NULL, phase = NULL, request_key = ?, submission_json = NULL, progress = 0, error = NULL,
               started_at = NULL, finished_at = NULL, updated_at = ? WHERE id = ?`)
-              .run(randomUUID(), now, item.episode_id);
+              .run(item.force ? 1 : 0, item.show_id, item.title, item.audio_url, randomUUID(), now, item.episode_id);
             added += 1;
           } else skipped += 1;
           continue;

@@ -27,6 +27,7 @@ const podcasts = new PodcastStore(database);
 const queue = new TranscriptionQueueStore(database);
 const transcripts = new TranscriptionStore(database);
 let firstShow = '';
+let transcriptEpisode = '';
 for (let i = 0; i < 54; i++) {
   const show = podcasts.addShow({ url: `https://example.com/show-${i}`, title: `测试节目 ${i}` });
   if (i < 27) podcasts.markSync(show.show_id, { status: 'succeeded' });
@@ -38,12 +39,18 @@ for (let i = 0; i < 54; i++) {
     audioUrl: `https://example.com/${n}.mp3`, imageUrl: null,
   })));
   const episodes = podcasts.listEpisodes(show.show_id);
+  transcriptEpisode = episodes[0]!.episode_id;
   queue.add(episodes.map((episode) => ({ ...episode, audio_url: episode.audio_url! })));
   for (const [n, episode] of episodes.slice(0, 25).entries()) transcripts.save({
     taskId: `transcript-task-${n}`, episodeId: episode.episode_id, showId: show.show_id,
     title: episode.title, language: 'zh', provider: 'test', model: '', durationSeconds: 60,
     text: '浏览器检查转写内容', segments: [{ start: 0, end: 60, text: '测试' }], artifactId: null,
   });
+  transcripts.save({ taskId: 'speaker-task', episodeId: transcriptEpisode, showId: show.show_id,
+    title: '浏览器双人转写', language: 'zh', provider: 'whisper-cli', model: 'small', durationSeconds: 60,
+    version: 2, diarization: { provider: 'pyannote', model: 'fixture' }, text: '你好 世界', segments: [
+      { start: 0, end: 30, text: '你好 <script>alert(1)</script>', speaker_id: 'speaker_1' },
+      { start: 30, end: 60, text: ' 世界', speaker_id: 'speaker_2' }], artifactId: null });
 }
 for (let i = 0; i < 55; i++) store.createTask('owner', 'podcast-tools', 'show/sync', { show_id: firstShow });
 queue.close(); transcripts.close(); podcasts.close();
@@ -158,7 +165,16 @@ try {
   await route('episodes?tab=transcripts', "document.querySelector('#content').innerText.includes('转写内容')");
   await click('下一页');
   await wait("document.querySelector('#content .queue-pagination')?.innerText.includes('第 2 / 2 页')");
-  assert.equal(await evaluate("document.querySelectorAll('#content tbody tr').length"), 5);
+  assert.equal(await evaluate("document.querySelectorAll('#content tbody tr').length"), 6);
+  await route(`transcript/${encodeURIComponent(transcriptEpisode)}`, "document.querySelectorAll('#content .transcript-turn').length === 2");
+  assert.match(await evaluate("document.querySelector('#content').innerText"), /说话者 1[\s\S]*说话者 2/);
+  assert.equal(await evaluate("document.querySelector('#content .transcript-card script') === null"), true);
+  await evaluate("window.__copied = ''; navigator.clipboard.writeText = async value => { window.__copied = value; }");
+  await evaluate("[...document.querySelectorAll('#page-actions button')].find(b=>b.textContent.includes('复制当前稿件')).click()");
+  await wait("window.__copied.includes('说话者 2')");
+  await evaluate("const select = document.querySelector('[aria-label=\"稿件版本\"]'); select.value='1'; select.dispatchEvent(new Event('change'))");
+  await wait("document.querySelector('#content .markdown')");
+  assert.match(await evaluate("document.querySelector('#content .markdown').innerText"), /浏览器检查转写内容/);
   await route('tasks?tab=transcribe', "document.querySelector('#content .queue-pagination')?.innerText.includes('共 65 项')");
   await evaluate("document.querySelector('#content input[aria-label=\"全选当前页\"]').click()");
   await click('下一页');
@@ -171,7 +187,7 @@ try {
   assert.equal(await evaluate("document.querySelectorAll('#content tbody tr').length"), 5);
   await route('tasks-all', "document.querySelector('#content').innerText.includes('任务列表')");
   assert.deepEqual(errors, []);
-  console.log('Chrome 页面检查通过：登录、总览、调度、应用、节目库、单集、转写历史、队列和任务翻页');
+  console.log('Chrome 页面检查通过：登录、分页、v1/v2切换、双人阅读、安全文本和带标签复制');
 } finally {
   await send?.('Browser.close').catch(() => {});
   socket?.close();

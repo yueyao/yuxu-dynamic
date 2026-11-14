@@ -19,7 +19,7 @@ import { pagination, cursorPagination } from './pagination.js';
       q: '', showId: '', since: '', until: '', transcript: '', source: '',
       sort: 'published_at', order: 'desc', page: 1, limit: 50,
     },
-    transcriptFilters: { q: '', limit: 20, page: 1 },
+    transcriptFilters: { q: '', limit: 20, page: 1, version: '' },
     queueSelected: new Set(),
     queueFilters: { q: '', showId: '', status: '', page: 1 },
     queueTimer: null,
@@ -1099,6 +1099,7 @@ import { pagination, cursorPagination } from './pagination.js';
       const transcriptFilters = state.transcriptFilters;
       const params = new URLSearchParams({ limit: String(transcriptFilters.limit), cursor: String((transcriptFilters.page - 1) * transcriptFilters.limit) });
       if (transcriptFilters.q) params.set('q', transcriptFilters.q);
+      if (transcriptFilters.version) params.set('version', transcriptFilters.version);
       const [data, queueData] = await Promise.all([
         transcription(`/transcripts?${params}`).catch(() => ({ transcripts: [], total: 0 })),
         transcription('/queue?summary=1').catch(() => null),
@@ -1208,14 +1209,16 @@ import { pagination, cursorPagination } from './pagination.js';
         el('div', { class: 'sub' }, fmtDateTime(episode.collected_at))),
       el('div', {},
         episode.transcript
-          ? el('div', {}, el('span', { class: 'badge badge-succeeded' }, '转写成功'),
+          ? el('div', {}, el('span', { class: 'badge badge-succeeded' }, `转写成功 · v${episode.transcript.version || 1}`),
               el('div', { class: 'sub' }, fmtDateTime(episode.transcript.created_at)))
           : el('span', { class: 'badge' }, '未转写')),
       el('div', { class: 'row-actions' },
         actionButton('查看', 'tasks', () => openEpisodeLibraryItem(episode), 'btn btn-sm'),
         episode.transcript
           ? actionButton('转写稿', 'arrow', () => navigate(`transcript/${encodeURIComponent(episode.episode_id)}`), 'btn btn-sm')
-          : actionButton('加入转写', 'mic', () => transcribeEpisode(episode), 'btn btn-sm btn-primary')),
+          : actionButton('加入转写', 'mic', () => transcribeEpisode(episode), 'btn btn-sm btn-primary'),
+        episode.transcript && episode.transcript.version !== 2
+          ? actionButton('生成 v2', 'mic', () => transcribeEpisode(episode), 'btn btn-sm') : null),
     ]);
 
     content.append(el('section', { class: 'card' },
@@ -1288,6 +1291,9 @@ import { pagination, cursorPagination } from './pagination.js';
         episode.transcript
           ? { label: '查看转写稿', class: 'btn-primary', onClick: () => { close(); navigate(`transcript/${encodeURIComponent(episode.episode_id)}`); } }
           : { label: '加入转写队列', class: 'btn-primary', onClick: async () => { close(); await transcribeEpisode(episode); } },
+        ...(episode.transcript && episode.transcript.version !== 2 ? [
+          { label: '生成 v2', onClick: async () => { close(); await transcribeEpisode(episode); } },
+        ] : []),
       ],
     });
   }
@@ -1821,6 +1827,7 @@ import { pagination, cursorPagination } from './pagination.js';
         el('div', { class: 'title-cell' }, transcript.title || '（无标题）'),
         el('div', { class: 'sub' }, shortId(transcript.episode_id))),
       transcript.show_title || shortId(transcript.show_id),
+      `v${transcript.version || 1}`,
       fmtDuration(transcript.duration_seconds),
       `${transcript.segments || 0} 段`,
       `${transcript.provider || '—'} / ${transcript.model || '—'}`,
@@ -1828,7 +1835,7 @@ import { pagination, cursorPagination } from './pagination.js';
       el('div', { class: 'row-actions' },
         transcript.episode_id
           ? actionButton('查看', 'tasks',
-            () => navigate(`transcript/${encodeURIComponent(transcript.episode_id)}`), 'btn btn-sm')
+            () => navigate(`transcript/${encodeURIComponent(transcript.episode_id)}?transcript_id=${encodeURIComponent(transcript.transcript_id)}`), 'btn btn-sm')
           : null,
         transcript.transcript_id
           ? actionButton('下载 MD', 'download', () => {
@@ -1846,13 +1853,17 @@ import { pagination, cursorPagination } from './pagination.js';
             renderEpisodes();
           }, 'btn btn-sm btn-primary'),
           limitSelect,
+          el('select', { class: 'select', 'aria-label': '稿件版本筛选', onChange: (event) => {
+            filters.version = event.target.value; filters.page = 1; renderEpisodes();
+          } }, option('', '全部版本', !filters.version), option('1', 'v1 · 原始转写稿', filters.version === '1'),
+            option('2', 'v2 · 说话者稿', filters.version === '2')),
           filters.q ? actionButton('清空', 'x', () => {
             state.transcriptFilters.q = ''; state.transcriptFilters.page = 1;
             renderEpisodes();
           }, 'btn btn-sm') : null)),
       el('div', { class: 'card-body flush' },
         transcripts.length
-          ? table(['单集', '节目', '时长', '片段', '引擎', '完成时间', '操作'], rows)
+          ? table(['单集', '节目', '版本', '时长', '片段', '引擎', '完成时间', '操作'], rows)
           : emptyState('没有匹配的转写稿', filters.q ? '换个关键词，或清空搜索条件。' : '队列完成一集后会自动写入这里。', 'tasks'),
         pagination({ page: filters.page, pages: Math.max(1, Math.ceil(transcriptTotal / filters.limit)), total: transcriptTotal,
           onPage: (page) => { filters.page = page; return renderEpisodes(); } }))));
@@ -1953,8 +1964,8 @@ import { pagination, cursorPagination } from './pagination.js';
         const existing = result.skipped_existing || 0;
         const parts = [`已加入 ${result.added} 集`];
         if (result.skipped) parts.push(`已在队列 ${result.skipped} 集`);
-        if (existing) parts.push(`已有转写稿 ${existing} 集`);
-        toast(result.added === 0 && existing ? '所选单集都已有转写稿，已跳过' : parts.join('，'), 'success');
+        if (existing) parts.push(`已有 v2 稿件 ${existing} 集`);
+        toast(result.added === 0 && existing ? '所选单集都已有 v2 稿件，已跳过' : parts.join('，'), 'success');
         closeModal();
         if (state.route === 'tasks') await renderTranscribeQueue();
       } catch (error) {
@@ -2066,7 +2077,7 @@ import { pagination, cursorPagination } from './pagination.js';
       method: 'POST', body: { episode_ids: [episode.episode_id] },
     });
     if (result.added === 0) {
-      toast(result.skipped_existing ? '该集已有转写稿，已跳过' : '该集已经在转写队列中', 'success');
+      toast(result.skipped_existing ? '该集已有 v2 稿件，已跳过' : '该集已经在转写队列中', 'success');
       return;
     }
     await transcription('/queue/start', { method: 'POST' });
@@ -2203,38 +2214,73 @@ import { pagination, cursorPagination } from './pagination.js';
       content.append(emptyState('转写稿不存在', '请从节目库的单集进入。', 'mic'));
       return;
     }
-    const data = await podcast(`/episodes/${encodeURIComponent(episodeId)}/transcript`);
+    const requestedVersion = hashParams().get('version');
+    const requestedId = hashParams().get('transcript_id');
+    const data = requestedId
+      ? await transcription(`/transcripts/${encodeURIComponent(requestedId)}`)
+      : await podcast(`/episodes/${encodeURIComponent(episodeId)}/transcript${requestedVersion ? `?version=${encodeURIComponent(requestedVersion)}` : ''}`);
     const transcript = data.transcript;
     clear(content);
     if (!transcript) {
       content.append(emptyState('还没有转写稿', '回到节目库，打开单集后点击“转写”。', 'mic'));
       return;
     }
+    const segments = transcript.segments || [];
+    const speakerName = (id) => typeof id === 'string' && /^speaker_[1-9]\d*$/.test(id)
+      ? `说话者 ${id.slice(8)}` : '说话者未确定';
+    const time = (seconds) => {
+      const total = Math.max(0, Math.floor(Number(seconds) || 0));
+      return [Math.floor(total / 3600), Math.floor(total / 60) % 60, total % 60]
+        .map((part) => String(part).padStart(2, '0')).join(':');
+    };
+    const v2 = transcript.version === 2;
+    const versions = data.available_versions || [transcript.version || 1];
+    const copyText = v2 ? segments.map((s) => `[${time(s.start)} → ${time(s.end)}] ${speakerName(s.speaker_id)}\n${s.text}`).join('\n\n') : transcript.text;
     setPageActions(
       back,
       actionButton('下载 Markdown', 'download', () => {
+        if (transcript.source === 'platform') {
+          if (!transcript.artifact_id) { toast('该任务没有可下载产物', 'error'); return; }
+          window.location.href = `/api/platform/artifacts/${encodeURIComponent(transcript.artifact_id)}/download`;
+          return;
+        }
         if (!transcript.transcript_id) {
           toast('缺少转写稿 ID，无法下载', 'error');
           return;
         }
         window.location.href = `/api/transcription/transcripts/${encodeURIComponent(transcript.transcript_id)}/markdown`;
       }, 'btn btn-primary'),
-      actionButton('复制原文', 'tasks', async () => {
-        try { await navigator.clipboard.writeText(transcript.text); toast('已复制转写原文', 'success'); }
+      actionButton(v2 ? '复制当前稿件' : '复制原文', 'tasks', async () => {
+        try { await navigator.clipboard.writeText(copyText); toast('已复制当前稿件', 'success'); }
         catch { toast('复制失败，请手动选择文本', 'error'); }
       }),
     );
+    const reading = v2 ? el('div', { class: 'transcript-turns' }, segments.map((segment) =>
+      el('article', { class: 'transcript-turn' },
+        el('div', { class: 'transcript-turn-head' },
+          el('strong', {}, speakerName(segment.speaker_id)),
+          el('span', { class: 'mono' }, `${time(segment.start)} → ${time(segment.end)}`)),
+        el('p', {}, segment.text)))) : renderMarkdown(transcript.text);
     content.append(el('div', { class: 'transcript-page' },
       el('div', { class: 'transcript-head' },
         el('div', { class: 'eyebrow' }, 'TRANSCRIPT'),
         el('h2', { class: 'transcript-title' }, transcript.title || '转写稿'),
         el('div', { class: 'transcript-meta' },
+          el('select', { class: 'select', 'aria-label': '稿件版本', onChange: (event) => {
+            navigate(`transcript/${encodeURIComponent(episodeId)}?version=${event.target.value}`);
+          } }, versions.map((version) => option(String(version), version === 2 ? 'v2 · 说话者稿' : 'v1 · 原始转写稿',
+            version === (transcript.version || 1)))),
           pill(transcript.language || 'unknown'),
           pill(`${transcript.provider || 'unknown'} / ${transcript.model || 'unknown'}`),
           pill(fmtDuration(transcript.duration_seconds)),
-          pill(`${(transcript.segments || []).length} 个片段`),
+          pill(`${segments.length} 个片段`),
+          v2 ? pill(`${new Set(segments.map((s) => s.speaker_id).filter(Boolean)).size} 位说话者`) : null,
+          !versions.includes(2) ? actionButton('生成 v2', 'mic', async () => {
+            const result = await podcast(`/episodes/${encodeURIComponent(episodeId)}`);
+            await transcribeEpisode(result.episode);
+          }, 'btn btn-sm') : null,
           el('span', { class: 'hint' }, fmtDateTime(transcript.created_at)))),
-      el('section', { class: 'card transcript-card' }, renderMarkdown(transcript.text))));
+      el('section', { class: 'card transcript-card' }, reading)));
   }
 
   async function openTranscript(episode) {

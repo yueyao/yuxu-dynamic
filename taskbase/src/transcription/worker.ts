@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /** 转写 Worker：下载公开音频 → ffmpeg 标准化 → 本地 ASR → 交付结果与产物到服务端。 */
-import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,8 +10,9 @@ import { envValue, positiveInt } from '../env.ts';
 import { diagnosticMessage, redactText } from '../redact.ts';
 import { RemoteError, WorkerClient, sleep, type WorkerLease } from '../worker-sdk.ts';
 import { TRANSCRIPTION_APP_ID } from './manifest.ts';
-import type { TranscriptSegment } from './store.ts';
-import type { AsrProvider, AsrResult } from './asr.ts';
+import type { AsrProvider, AsrResult, AsrSegment } from './asr.ts';
+import { PyannoteProvider, alignSpeakers, normalizeTurns, type DiarizationProvider, type DiarizationResult } from './diarization.ts';
+import { validateTranscript } from './contract.ts';
 import { createAsrProvider } from './providers.ts';
 import { SafeHttpClient } from './safe-http.ts';
 import { renderTranscriptMarkdown } from './markdown.ts';
@@ -20,6 +22,8 @@ const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 
 export type TranscriptionWorkerOptions = {
   asrProvider?: AsrProvider;
+  diarizationProvider?: DiarizationProvider;
+  downloadAudio?: (url: string, destination: string, signal?: AbortSignal) => Promise<void>;
   pollMs?: number;
   chunkSeconds?: number;
   signal?: AbortSignal;
@@ -38,6 +42,7 @@ function input(value: unknown): TaskInput {
     throw new Error('转写任务输入必须是对象');
   }
   const record = value as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== 2) throw new Error('TRANSCRIPT_INVALID: 新任务仅支持version=2');
   if (typeof record.audio_url !== 'string' || !record.audio_url.startsWith('http')) {
     throw new Error('缺少有效的 audio_url');
   }
@@ -62,7 +67,7 @@ async function download(url: string, destination: string, signal?: AbortSignal):
   });
 }
 
-async function runFfmpeg(inputPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {
+export async function runFfmpeg(inputPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {
   await runProcess('ffmpeg', [
     '-y', '-loglevel', 'error', '-i', inputPath,
     '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', outputPath,
@@ -107,7 +112,7 @@ export async function splitAudio(wav: string, workDir: string, chunkSeconds: num
 }
 
 export function mergeChunks(chunks: Array<{ offset: number; result: AsrResult }>): AsrResult {
-  const segments: TranscriptSegment[] = [];
+  const segments: AsrSegment[] = [];
   const texts: string[] = [];
   let language = 'zh';
   let durationSeconds = 0;
@@ -115,7 +120,9 @@ export function mergeChunks(chunks: Array<{ offset: number; result: AsrResult }>
     if (result.text.trim()) texts.push(result.text.trim());
     language = result.language || language;
     for (const segment of result.segments) {
-      segments.push({ start: segment.start + offset, end: segment.end + offset, text: segment.text });
+      segments.push({ ...segment, start: segment.start + offset, end: segment.end + offset,
+        ...(segment.words ? { words: segment.words.map((word) => ({ ...word, start: word.start + offset, end: word.end + offset })) } : {}),
+      });
     }
     durationSeconds += result.durationSeconds;
   }
@@ -129,33 +136,68 @@ export function mergeChunks(chunks: Array<{ offset: number; result: AsrResult }>
   };
 }
 
+export async function audioDigest(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+export function checkpointKey(kind: string, identity: unknown): string {
+  return `v2-${kind}-${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+}
+
+function checkpointSize(value: unknown): void {
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 7 * 1024 * 1024) {
+    throw new Error('TRANSCRIPT_TOO_LARGE: 检查点或结果超过7 MiB安全上限');
+  }
+}
+
 export async function executeTranscriptionLease(client: WorkerClient, lease: WorkerLease,
   options: TranscriptionWorkerOptions = {}): Promise<void> {
   if (lease.app_id !== TRANSCRIPTION_APP_ID || lease.task_key !== 'episode/transcribe') {
     throw new Error('不是转写应用的任务');
   }
   const task = input(lease.input);
-  const provider = options.asrProvider ?? createAsrProvider();
+  const provider = options.asrProvider ?? createAsrProvider(process.env, true);
+  if (!['whisper-cli', 'mlx-whisper'].includes(provider.name)) throw new Error('TRANSCRIPTION_CONFIG: v2仅支持本地Whisper，请设置TRANSCRIPTION_PROVIDER=whisper');
+  const diarizer = options.diarizationProvider ?? new PyannoteProvider();
   const workDir = await mkdtemp(join(tmpdir(), 'taskbase-transcribe-'));
   try {
     await client.withHeartbeat(lease, async (active, signal) => {
       await active.log(lease, 'info', `开始转写：${task.title ?? lease.task_id}`);
+      await active.progress(lease, 1, '检查本地说话者模型');
+      await diarizer.prepare?.(signal);
       await active.progress(lease, 5, '下载音频');
       const downloaded = join(workDir, 'source');
-      await download(task.audio_url, downloaded, signal);
+      await (options.downloadAudio ?? download)(task.audio_url, downloaded, signal);
 
       await active.progress(lease, 20, '转换为 16k 单声道 WAV');
       const wav = join(workDir, 'audio.wav');
       await runFfmpeg(downloaded, wav, signal);
+      const digest = await audioDigest(wav);
+
+      await active.progress(lease, 24, '整集说话者分析');
+      const diarizationKey = checkpointKey('speakers', [digest, diarizer.cacheIdentity]);
+      let diarization = active.stepValue<DiarizationResult>(lease, diarizationKey);
+      if (!diarization) {
+        const started = performance.now();
+        diarization = await diarizer.analyze(wav, signal);
+        signal.throwIfAborted();
+        diarization.turns = normalizeTurns(diarization.turns);
+        checkpointSize(diarization);
+        await active.saveStep(lease, diarizationKey, diarization);
+        await active.log(lease, 'info', `整集说话者分析耗时 ${Math.round((performance.now() - started) / 1000)} 秒`);
+      }
 
       const chunkSeconds = options.chunkSeconds
         ?? Number(process.env.TRANSCRIPTION_CHUNK_SECONDS ?? 600);
       const chunks = await splitAudio(wav, workDir, chunkSeconds, signal);
       await active.progress(lease, 30, `音频 ${chunks.length} 段，开始转写`);
       const completed: Array<{ offset: number; result: AsrResult }> = [];
+      const asrIdentity = [digest, chunkSeconds, task.language ?? 'zh', provider.name, provider.model, provider.cacheIdentity, true];
       for (const [index, chunk] of chunks.entries()) {
         signal.throwIfAborted();
-        const stepKey = `asr-chunk-${index}`;
+        const stepKey = checkpointKey(`asr-${index}`, asrIdentity);
         let chunkResult = active.stepValue<AsrResult>(lease, stepKey);
         if (chunkResult) {
           await active.log(lease, 'info', `复用切片检查点 ${index + 1}/${chunks.length}`);
@@ -164,13 +206,19 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
             `转写切片 ${index + 1}/${chunks.length}`);
           chunkResult = await provider.transcribe(chunk.path, task.language ?? 'zh', signal);
           signal.throwIfAborted();
+          checkpointSize(chunkResult);
           await active.saveStep(lease, stepKey, chunkResult);
         }
         completed.push({ offset: chunk.offset, result: chunkResult });
       }
       const result = mergeChunks(completed);
+      result.durationSeconds = chunks.reduce((sum, chunk) => sum + chunk.duration, 0);
+      result.segments = alignSpeakers(result.segments, diarization.turns);
+      validateTranscript({ ...result, version: 2, diarization: diarization.metadata });
+      checkpointSize(result);
       await active.progress(lease, 88, '生成文字稿');
       const artifact = Buffer.from(renderTranscriptMarkdown({
+        version: 2, diarization: diarization.metadata,
         title: task.title ?? null,
         language: result.language,
         provider: provider.name,
@@ -180,8 +228,11 @@ export async function executeTranscriptionLease(client: WorkerClient, lease: Wor
         segments: result.segments,
       }), 'utf8');
       const artifactId = await active.uploadArtifact(lease, 'transcript.md', artifact, 'text/markdown; charset=utf-8');
+      signal.throwIfAborted();
       await active.progress(lease, 95, '上传完成');
       await active.complete(lease, {
+        version: 2,
+        diarization: diarization.metadata,
         transcript_id: `transcript-${randomUUID()}`,
         artifact_id: artifactId,
         segments: result.segments,

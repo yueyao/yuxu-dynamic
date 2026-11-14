@@ -3,10 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { TranscriptContractError, validateTranscript, type TranscriptVersion, type TranscriptSegment,
+  type DiarizationMetadata } from './contract.ts';
 
-export type TranscriptSegment = { start: number; end: number; text: string };
+export type { TranscriptSegment, TranscriptVersion, DiarizationMetadata } from './contract.ts';
 
 export type TranscriptRecord = {
+  version: TranscriptVersion;
+  diarization: DiarizationMetadata | null;
   transcript_id: string;
   task_id: string;
   episode_id: string | null;
@@ -23,6 +27,7 @@ export type TranscriptRecord = {
 };
 
 type TranscriptRow = {
+  version: TranscriptVersion; diarization_json: string | null;
   id: string; task_id: string; episode_id: string | null; show_id: string | null;
   title: string | null; language: string; provider: string; model: string;
   duration_seconds: number | null; text: string; segments_json: string;
@@ -36,8 +41,8 @@ export class TranscriptionStore {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(path);
     this.db.exec(`
-      PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
+      PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS transcription_transcripts (
         id TEXT PRIMARY KEY,
@@ -58,6 +63,19 @@ export class TranscriptionStore {
         ON transcription_transcripts(episode_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS transcription_transcripts_history ON transcription_transcripts(created_at DESC, id DESC);
     `);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const columns = this.db.prepare('PRAGMA table_info(transcription_transcripts)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'version')) {
+        this.db.exec('ALTER TABLE transcription_transcripts ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK(version IN (1, 2))');
+      }
+      if (!columns.some((column) => column.name === 'diarization_json')) {
+        this.db.exec('ALTER TABLE transcription_transcripts ADD COLUMN diarization_json TEXT');
+      }
+      this.db.exec(`CREATE INDEX IF NOT EXISTS transcription_transcripts_version
+        ON transcription_transcripts(episode_id, version DESC, created_at DESC, id DESC)`);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error; }
   }
 
   close(): void {
@@ -65,6 +83,8 @@ export class TranscriptionStore {
   }
 
   save(input: {
+    version?: TranscriptVersion;
+    diarization?: DiarizationMetadata | null;
     taskId: string;
     episodeId?: string | null;
     showId?: string | null;
@@ -77,29 +97,41 @@ export class TranscriptionStore {
     segments: TranscriptSegment[];
     artifactId: string | null;
   }): TranscriptRecord {
+    const version = validateTranscript(input);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
     const now = Date.now();
     const existing = this.db.prepare('SELECT * FROM transcription_transcripts WHERE task_id = ?')
       .get(input.taskId) as TranscriptRow | undefined;
+    if (existing && existing.version !== version) {
+      throw new TranscriptContractError('TRANSCRIPT_VERSION_CONFLICT: 同一任务不能更改稿件版本，请新建任务');
+    }
     const id = existing?.id ?? `transcript-${randomUUID()}`;
     this.db.prepare(`INSERT INTO transcription_transcripts(
       id, task_id, episode_id, show_id, title, language, provider, model,
-      duration_seconds, text, segments_json, artifact_id, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      duration_seconds, text, segments_json, artifact_id, created_at, version, diarization_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(task_id) DO UPDATE SET
       artifact_id = excluded.artifact_id,
       text = excluded.text,
       segments_json = excluded.segments_json,
-      duration_seconds = excluded.duration_seconds`).run(
+      duration_seconds = excluded.duration_seconds,
+      diarization_json = excluded.diarization_json`).run(
       id, input.taskId, input.episodeId ?? null, input.showId ?? null,
       input.title ?? null, input.language, input.provider, input.model,
       input.durationSeconds, input.text, JSON.stringify(input.segments),
-      input.artifactId, existing?.created_at ?? now,
+      input.artifactId, existing?.created_at ?? now, version,
+      version === 2 ? JSON.stringify(input.diarization) : null,
     );
+    this.db.exec('COMMIT');
     return this.getByTask(input.taskId) as TranscriptRecord;
+    } catch (error) { if (this.db.isTransaction) this.db.exec('ROLLBACK'); throw error; }
   }
 
   private toRecord(row: TranscriptRow): TranscriptRecord {
     return {
+      version: row.version,
+      diarization: row.diarization_json ? JSON.parse(row.diarization_json) as DiarizationMetadata : null,
       transcript_id: row.id,
       task_id: row.task_id,
       episode_id: row.episode_id,
@@ -122,10 +154,17 @@ export class TranscriptionStore {
     return row ? this.toRecord(row) : null;
   }
 
-  getByEpisode(episodeId: string): TranscriptRecord | null {
+  getByEpisode(episodeId: string, version?: TranscriptVersion): TranscriptRecord | null {
     const row = this.db.prepare(`SELECT * FROM transcription_transcripts
-      WHERE episode_id = ? ORDER BY created_at DESC LIMIT 1`).get(episodeId) as TranscriptRow | undefined;
+      WHERE episode_id = ? ${version ? 'AND version = ?' : ''}
+      ORDER BY version DESC, created_at DESC, id DESC LIMIT 1`)
+      .get(...(version ? [episodeId, version] : [episodeId])) as TranscriptRow | undefined;
     return row ? this.toRecord(row) : null;
+  }
+
+  availableVersions(episodeId: string): TranscriptVersion[] {
+    return (this.db.prepare('SELECT DISTINCT version FROM transcription_transcripts WHERE episode_id = ? ORDER BY version')
+      .all(episodeId) as Array<{ version: TranscriptVersion }>).map((row) => row.version);
   }
 
   list(limit = 20): TranscriptRecord[] {
@@ -148,7 +187,7 @@ export class TranscriptionStore {
   }
 
   listPage(options: {
-    limit?: number; offset?: number; showId?: string; episodeId?: string; query?: string;
+    limit?: number; offset?: number; showId?: string; episodeId?: string; query?: string; version?: TranscriptVersion;
   } = {}): { items: TranscriptRecord[]; next_offset: number | null } {
     const limit = Number.isSafeInteger(options.limit)
       ? Math.min(Math.max(options.limit as number, 1), 100) : 20;
@@ -156,6 +195,7 @@ export class TranscriptionStore {
       ? Math.max(options.offset as number, 0) : 0;
     const clauses: string[] = [];
     const params: Array<string | number> = [];
+    if (options.version) { clauses.push('version = ?'); params.push(options.version); }
     if (options.showId) { clauses.push('show_id = ?'); params.push(options.showId); }
     if (options.episodeId) { clauses.push('episode_id = ?'); params.push(options.episodeId); }
     if (options.query) {
@@ -164,7 +204,7 @@ export class TranscriptionStore {
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.prepare(`SELECT * FROM transcription_transcripts ${where}
-      ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as TranscriptRow[];
+      ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as TranscriptRow[];
     return {
       items: rows.map((row) => this.toRecord(row)),
       next_offset: rows.length === limit ? offset + limit : null,
@@ -176,6 +216,7 @@ export class TranscriptionStore {
     const offset = Number.isSafeInteger(options.offset) ? Math.max(options.offset!, 0) : 0;
     const clauses: string[] = [];
     const params: Array<string | number> = [];
+    if (options.version) { clauses.push('version = ?'); params.push(options.version); }
     if (options.showId) { clauses.push('show_id = ?'); params.push(options.showId); }
     if (options.episodeId) { clauses.push('episode_id = ?'); params.push(options.episodeId); }
     if (options.query) {
@@ -184,10 +225,10 @@ export class TranscriptionStore {
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM transcription_transcripts ${where}`).get(...params) as { count: number }).count;
-    const rows = this.db.prepare(`SELECT id AS transcript_id, task_id, episode_id, show_id, title, language,
+    const rows = this.db.prepare(`SELECT id AS transcript_id, task_id, episode_id, show_id, title, language, version,
       provider, model, duration_seconds, json_array_length(segments_json) AS segments, created_at
       FROM transcription_transcripts ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
-      .all(...params, limit, offset) as Array<Omit<TranscriptRecord, 'text' | 'segments' | 'artifact_id' | 'created_at'> & { segments: number; created_at: number }>;
+      .all(...params, limit, offset) as Array<Omit<TranscriptRecord, 'text' | 'segments' | 'artifact_id' | 'created_at' | 'diarization'> & { segments: number; created_at: number }>;
     return { items: rows.map((row) => ({ ...row, created_at: new Date(row.created_at).toISOString() })),
       total, next_offset: offset + rows.length < total ? offset + limit : null };
   }

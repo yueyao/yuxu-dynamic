@@ -555,7 +555,7 @@ async function main(args = process.argv.slice(2)): Promise<void> {
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       throw new Error('音频 URL 必须是 http(s)');
     }
-    const input: Record<string, unknown> = { audio_url: parsed.toString() };
+    const input: Record<string, unknown> = { audio_url: parsed.toString(), version: 2 };
     const title = option(args, '--title');
     const language = option(args, '--language');
     const episodeId = option(args, '--episode-id');

@@ -191,13 +191,16 @@ export class ElevenLabsProvider implements AsrProvider {
   }
 }
 
-export function createAsrProvider(environment: ProviderEnvironment = process.env): AsrProvider {
+export function createAsrProvider(environment: ProviderEnvironment = process.env, wordTimestamps = false): AsrProvider {
   const name = (environment.TRANSCRIPTION_PROVIDER ?? 'whisper').trim().toLowerCase();
   if (name === 'whisper') {
     return new WhisperCliProvider({
+      backend: environment.TRANSCRIPTION_WHISPER_BACKEND,
+      mlxPython: environment.TRANSCRIPTION_MLX_PYTHON,
       model: environment.TRANSCRIPTION_WHISPER_MODEL,
       device: environment.TRANSCRIPTION_WHISPER_DEVICE,
       command: environment.TRANSCRIPTION_WHISPER_BIN,
+      wordTimestamps,
     });
   }
   if (name === 'funasr') {

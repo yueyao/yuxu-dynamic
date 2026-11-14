@@ -376,7 +376,13 @@ Mac Agent 路径/Node 还支持 `YUXUN_MAC_AGENT_DIR`、`YUXUN_LEGACY_AGENT_DIR`
 | `TRANSCRIPTION_PROVIDER` | `whisper` / `funasr` / `elevenlabs` |
 | `TRANSCRIPTION_WHISPER_MODEL` | 默认 `small` |
 | `TRANSCRIPTION_CHUNK_SECONDS` | 默认 600 |
+| `TRANSCRIPTION_DIARIZATION_PYTHON` | v2专用Python绝对路径，必须安装pyannote 4.x |
+| `TRANSCRIPTION_DIARIZATION_OFFLINE` | 权重缓存完整后设置1，离线分析 |
 | `TRANSCRIPTION_ALLOW_INSECURE_HTTP` | 仅本地测试 |
+
+后续转写默认v2（带说话者）；旧稿保留v1。新增依赖、模型授权、配置与本机计时见 [转写v2](transcription-v2.md)。全局安装需重新执行`npm run install:global`，Worker空闲后重启。
+
+Apple Silicon可选`TRANSCRIPTION_WHISPER_BACKEND=mlx`、`TRANSCRIPTION_MLX_PYTHON=<独立Python绝对路径>`和`TRANSCRIPTION_DIARIZATION_DEVICE=mps`；默认仍为CLI/CPU。MLX模式的`worker doctor`检查MLX依赖，真实词时间戳和耗时需运行本机基准验证，详见同一操作文档。
 | `FUNASR_BASE_URL` / `FUNASR_API_TOKEN` | FunASR |
 | `ELEVENLABS_API_KEY` | ElevenLabs |
 

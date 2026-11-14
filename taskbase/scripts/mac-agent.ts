@@ -7,10 +7,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 import { envValue } from '../src/env.ts';
 import { diagnosticMessage, redactText } from '../src/redact.ts';
+import { runProcess } from '../src/process.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LABEL = 'com.yuxun.worker';
@@ -158,7 +160,14 @@ function legacyServiceTarget(): string {
   return `gui/${process.getuid?.() ?? 501}/${LEGACY_LABEL}`;
 }
 
-function envFile(server: string, token: string, dataDir: string, model: string, provider: string): string {
+function envFile(server: string, token: string, dataDir: string, model: string, provider: string, previous: string): string {
+  const managed = new Set(['YUXUN_URL', 'YUXUN_WORKER_TOKEN', 'YUXUN_DATA_DIR', 'TRANSCRIPTION_PROVIDER',
+    'TRANSCRIPTION_WHISPER_MODEL', 'TRANSCRIPTION_MODEL', 'YUXUN_POLL_MS', 'YUXUN_HEARTBEAT_MS']);
+  // 配对只替换自身管理的字段；保留模型环境和HF凭据的原始引号/格式。
+  const custom = previous.split('\n').filter((line) => {
+    const key = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/)?.[1];
+    return !key || !managed.has(key);
+  }).join('\n').trim();
   return [
     `YUXUN_URL=${server}`,
     `YUXUN_WORKER_TOKEN=${token}`,
@@ -168,15 +177,17 @@ function envFile(server: string, token: string, dataDir: string, model: string, 
     `TRANSCRIPTION_MODEL=${model}`,
     'YUXUN_POLL_MS=2000',
     'YUXUN_HEARTBEAT_MS=15000',
+    custom,
     '',
   ].join('\n');
 }
 
 async function pair(args: string[]): Promise<void> {
   await migrateLegacyFiles();
+  const previousEnv = existsSync(envPath()) ? await readFile(envPath(), 'utf8') : '';
   const server = (option(args, '--server') ?? envValue('YUXUN_URL', 'TASKBASE_URL', '') as string).replace(/\/+$/, '');
   const token = option(args, '--token') ?? envValue('YUXUN_WORKER_TOKEN', 'TASKBASE_WORKER_TOKEN')
-    ?? (existsSync(envPath()) ? (await readFile(envPath(), 'utf8')).match(/^(?:YUXUN_WORKER_TOKEN|TASKBASE_WORKER_TOKEN)=(.*)$/m)?.[1] : undefined);
+    ?? previousEnv.match(/^(?:YUXUN_WORKER_TOKEN|TASKBASE_WORKER_TOKEN)=(.*)$/m)?.[1];
   if (!server) throw new Error('缺少 --server，例如 http://43.156.253.152');
   if (!token) throw new Error('缺少 --token（Transcription Worker Token）');
   const parsed = new URL(server);
@@ -190,7 +201,7 @@ async function pair(args: string[]): Promise<void> {
   await mkdir(agentDir(), { recursive: true, mode: 0o700 });
   await chmod(agentDir(), 0o700);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  await writeFile(envPath(), envFile(server, token, dataDir, model, provider), { mode: 0o600 });
+  await writeFile(envPath(), envFile(server, token, dataDir, model, provider, previousEnv), { mode: 0o600 });
   await chmod(envPath(), 0o600);
   const config: AgentConfig = {
     server, provider, model, data_dir: dataDir,
@@ -214,11 +225,43 @@ async function doctor(): Promise<void> {
   const checks: Array<[string, boolean, string]> = [];
   checks.push(['配置文件', Boolean(config), config ? configPath() : `缺少 ${configPath()}`]);
   const env = existsSync(envPath()) ? await readFile(envPath(), 'utf8') : '';
+  const workerEnvironment = { ...parseEnv(env), ...process.env };
   checks.push(['Worker Token', /^(?:YUXUN_WORKER_TOKEN|TASKBASE_WORKER_TOKEN)=.+/m.test(env), envPath()]);
   const ffmpeg = await quiet('ffmpeg', ['-version']);
   checks.push(['ffmpeg', ffmpeg.ok, ffmpeg.ok ? ffmpeg.output.split('\n')[0] : '未安装或不在 PATH']);
-  const whisper = await quiet(process.env.TRANSCRIPTION_WHISPER_BIN ?? 'whisper', ['--help']);
-  checks.push(['whisper CLI', whisper.ok, whisper.ok ? '可用' : '未安装或不在 PATH']);
+  const backend = workerEnvironment.TRANSCRIPTION_WHISPER_BACKEND ?? 'cli';
+  if (backend === 'mlx') {
+    const mlxPython = workerEnvironment.TRANSCRIPTION_MLX_PYTHON;
+    if (!mlxPython || !isAbsolute(mlxPython)) {
+      checks.push(['MLX Python依赖', false, '请配置 TRANSCRIPTION_MLX_PYTHON 为专用Python绝对路径']);
+    } else {
+      try {
+        await runProcess(mlxPython, [join(ROOT, 'scripts', 'mlx-whisper.py'), '--check'],
+          { timeoutMs: 60_000, env: workerEnvironment });
+        checks.push(['MLX Python依赖', true, '可导入（不代表真实推理已验收）']);
+      } catch { checks.push(['MLX Python依赖', false, '缺依赖或Apple GPU不可用；见 docs/transcription-v2.md']); }
+    }
+  } else if (backend === 'cli') {
+    const whisper = await quiet(workerEnvironment.TRANSCRIPTION_WHISPER_BIN ?? 'whisper', ['--help']);
+    checks.push(['whisper CLI', whisper.ok, whisper.ok ? '可用' : '未安装或不在 PATH']);
+  } else checks.push(['Whisper backend', false, 'TRANSCRIPTION_WHISPER_BACKEND必须为cli或mlx']);
+  const python = workerEnvironment.TRANSCRIPTION_DIARIZATION_PYTHON;
+  checks.push(['v2 ASR', (workerEnvironment.TRANSCRIPTION_PROVIDER ?? config?.provider ?? 'whisper') === 'whisper', 'v2需要本地Whisper']);
+  if (!python) checks.push(['v2 说话者模型', false, '请配置 TRANSCRIPTION_DIARIZATION_PYTHON，见 docs/transcription-v2.md']);
+  else {
+    const bridge = join(ROOT, 'scripts', 'diarize.py');
+    try {
+      await runProcess(python, [bridge, '--check'], { timeoutMs: 60_000, env: workerEnvironment });
+      checks.push(['v2 Python依赖', true, '可导入（不代表真实推理已验收）']);
+      const args = [bridge, '--resolve-only', '--offline', '--model',
+        workerEnvironment.TRANSCRIPTION_DIARIZATION_MODEL ?? 'pyannote/speaker-diarization-community-1',
+        '--revision', workerEnvironment.TRANSCRIPTION_DIARIZATION_REVISION ?? 'main'];
+      try {
+        await runProcess(python, args, { timeoutMs: 60_000, env: workerEnvironment });
+        checks.push(['v2 模型文件', true, '离线文件已解析；请运行真实样本基准验证加载/推理']);
+      } catch { checks.push(['v2 模型文件', false, '模型未缓存或不完整；doctor不会下载模型']); }
+    } catch { checks.push(['v2 Python依赖', false, '缺依赖或Python路径无效；请按独立环境安装文档配置']); }
+  }
   if (config) {
     const server = await health(config.server);
     checks.push(['服务端 /health', server.ok, `${config.server} ${server.detail}`]);

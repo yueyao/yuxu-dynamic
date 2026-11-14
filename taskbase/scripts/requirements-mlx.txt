@@ -1,0 +1,3 @@
+# Apple Silicon专用独立环境；标准Whisper不需要这些依赖。
+mlx-whisper==0.4.3
+opencc-python-reimplemented==0.1.7

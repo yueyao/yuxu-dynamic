@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -158,11 +158,37 @@ test('Mac pair：新别名 URL、Token、Node/目录以及显式参数优先级'
   let config = JSON.parse(await readFile(join(dir, 'agent/worker.json'), 'utf8'));
   assert.equal(config.server, url); assert.equal(config.node, process.execPath);
   assert.match(await readFile(join(dir, 'agent/worker.env'), 'utf8'), /YUXUN_WORKER_TOKEN=new-mac-test-token/);
+  await appendFile(join(dir, 'agent/worker.env'),
+    '\nTRANSCRIPTION_DIARIZATION_PYTHON="/tmp/isolated python/bin/python"\nTRANSCRIPTION_DIARIZATION_OFFLINE=1\nHF_TOKEN=hf_local_test_only\n');
   await run(['scripts/mac-agent.ts', 'pair', '--server', url, '--token', 'explicit-mac-test-token', '--data-dir', join(dir, 'explicit-data')],
     { ...env, YUXUN_URL: 'http://127.0.0.1:1' });
   config = JSON.parse(await readFile(join(dir, 'agent/worker.json'), 'utf8'));
   assert.equal(config.data_dir, join(dir, 'explicit-data'));
   assert.match(await readFile(join(dir, 'agent/worker.env'), 'utf8'), /YUXUN_WORKER_TOKEN=explicit-mac-test-token/);
+  const repaired = await readFile(join(dir, 'agent/worker.env'), 'utf8');
+  assert.match(repaired, /TRANSCRIPTION_DIARIZATION_PYTHON="\/tmp\/isolated python\/bin\/python"/);
+  assert.match(repaired, /TRANSCRIPTION_DIARIZATION_OFFLINE=1/);
+  assert.match(repaired, /HF_TOKEN=hf_local_test_only/);
+  assert.doesNotMatch(repaired, /YUXUN_WORKER_TOKEN=new-mac-test-token/);
+});
+
+test('Mac doctor：MLX配置只检查指定Python，不要求标准Whisper CLI', async (t) => {
+  const dir = await temp(t);
+  const url = await listen(t, createServer((_request, response) => response.end('{}')));
+  const python = join(dir, 'python.cjs');
+  await writeFile(python, `#!/usr/bin/env node
+const a=process.argv.slice(2);
+if(!a.includes('--check')&&!a.includes('--resolve-only'))process.exit(2);
+console.log(JSON.stringify({dependencies:true,inference_verified:false,revision:'fixed'}));`);
+  await chmod(python, 0o755);
+  const env = { YUXUN_MAC_AGENT_DIR: join(dir, 'agent'), YUXUN_LEGACY_AGENT_DIR: join(dir, 'legacy'),
+    YUXUN_DATA_DIR: join(dir, 'data'), YUXUN_URL: url, YUXUN_WORKER_TOKEN: 'test-worker-token' };
+  await run(['scripts/mac-agent.ts', 'pair'], env);
+  await appendFile(join(dir, 'agent/worker.env'), `\nTRANSCRIPTION_WHISPER_BACKEND=mlx\nTRANSCRIPTION_MLX_PYTHON=${python}\nTRANSCRIPTION_WHISPER_BIN=/absent/whisper\nTRANSCRIPTION_DIARIZATION_PYTHON=${python}\n`);
+  const output = await run(['scripts/mac-agent.ts', 'doctor'], env);
+  assert.match(output, /✅ MLX Python依赖/);
+  assert.doesNotMatch(output, /whisper CLI/);
+  assert.match(output, /不代表真实推理已验收/);
 });
 
 test('CLI：新密码别名优先；空新值不使用旧密码；内联超限输入在联网前被拒绝', async (t) => {

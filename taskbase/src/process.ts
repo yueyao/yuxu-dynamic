@@ -2,14 +2,14 @@
 import { spawn } from 'node:child_process';
 
 export async function runProcess(command: string, args: string[], options: {
-  signal?: AbortSignal; timeoutMs?: number;
+  signal?: AbortSignal; timeoutMs?: number; env?: NodeJS.ProcessEnv;
 } = {}): Promise<string> {
   options.signal?.throwIfAborted();
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 30 * 60 * 1000);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   return new Promise((resolve, reject) => {
     const grouped = process.platform !== 'win32';
-    const child = spawn(command, args, { detached: grouped, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { detached: grouped, stdio: ['ignore', 'pipe', 'pipe'], env: options.env });
     let stdout = '';
     let stderr = '';
     let killTimer: ReturnType<typeof setTimeout> | undefined;
